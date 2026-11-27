@@ -1,0 +1,160 @@
+name: Release
+
+# Builds the Sylva Chat installers and publishes them as a GitHub Release named after the version
+# in tauri.conf.json. Run it by pushing a tag like v0.1.0, or by hand from the Actions tab (it
+# then tags the commit it built). With the TAURI_SIGNING_PRIVATE_KEY secret set, it also signs
+# the update files and writes latest.json, so installed copies update themselves.
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: ${{ matrix.name }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: Windows
+            os: windows-latest
+            target: ""
+            bundle: target/release/bundle
+          - name: macOS (Apple Silicon)
+            os: macos-latest
+            target: aarch64-apple-darwin
+            bundle: target/aarch64-apple-darwin/release/bundle
+          - name: macOS (Intel)
+            os: macos-latest
+            target: x86_64-apple-darwin
+            bundle: target/x86_64-apple-darwin/release/bundle
+          - name: Linux
+            os: ubuntu-22.04
+            target: ""
+            bundle: target/release/bundle
+    runs-on: ${{ matrix.os }}
+    env:
+      TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+      TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ""
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install system libraries
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev librsvg2-dev libayatana-appindicator3-dev libssl-dev libdbus-1-dev pkg-config patchelf xdg-utils
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Build the installer
+        shell: bash
+        run: |
+          args=()
+          [ -n "${{ matrix.target }}" ] && args+=(--target "${{ matrix.target }}")
+          # Without the signing key, build plain installers and skip the update files.
+          [ -z "$TAURI_SIGNING_PRIVATE_KEY" ] && args+=(--config tauri.ci.conf.json)
+          npx --yes @tauri-apps/cli@2 build "${args[@]}"
+      - name: Name the macOS update file after its chip
+        if: runner.os == 'macOS' && env.TAURI_SIGNING_PRIVATE_KEY != ''
+        shell: bash
+        run: |
+          arch=$([ "${{ matrix.target }}" = aarch64-apple-darwin ] && echo aarch64 || echo x64)
+          cd "${{ matrix.bundle }}/macos"
+          mv "Sylva Chat.app.tar.gz" "Sylva-Chat_${arch}.app.tar.gz"
+          mv "Sylva Chat.app.tar.gz.sig" "Sylva-Chat_${arch}.app.tar.gz.sig"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: sylva-chat-${{ matrix.os }}-${{ matrix.target || 'native' }}
+          path: |
+            ${{ matrix.bundle }}/nsis/*.exe
+            ${{ matrix.bundle }}/nsis/*.exe.sig
+            ${{ matrix.bundle }}/msi/*.msi
+            ${{ matrix.bundle }}/macos/*.app.tar.gz
+            ${{ matrix.bundle }}/macos/*.app.tar.gz.sig
+            ${{ matrix.bundle }}/appimage/*.AppImage.sig
+            ${{ matrix.bundle }}/dmg/*.dmg
+            ${{ matrix.bundle }}/appimage/*.AppImage
+            ${{ matrix.bundle }}/deb/*.deb
+            ${{ matrix.bundle }}/rpm/*.rpm
+          if-no-files-found: error
+
+  publish:
+    name: Publish the release
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Read the version
+        id: version
+        run: echo "tag=v$(jq -r .version tauri.conf.json)" >> "$GITHUB_OUTPUT"
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - name: Gather the installers and write latest.json for the in-app updater
+        env:
+          TAG: ${{ github.ref_type == 'tag' && github.ref_name || steps.version.outputs.tag }}
+          REPO: ${{ github.repository }}
+        run: |
+          mkdir out sigs
+          find dist -type f ! -name '*.sig' -exec cp {} out/ \;
+          find dist -type f -name '*.sig' -exec cp {} sigs/ \;
+          # GitHub turns spaces in asset names into dots, so use dashes ("Sylva-Chat_...").
+          for f in out/* sigs/*; do
+            case "$f" in *" "*) mv "$f" "${f// /-}" ;; esac
+          done
+          if ls sigs/*.sig >/dev/null 2>&1; then
+          python3 - <<'PY'
+          import glob, json, os, datetime
+          tag, repo = os.environ["TAG"], os.environ["REPO"]
+          base = f"https://github.com/{repo}/releases/download/{tag}/"
+          wanted = {
+              "windows-x86_64": "*_x64-setup.exe",
+              "darwin-aarch64": "Sylva-Chat_aarch64.app.tar.gz",
+              "darwin-x86_64": "Sylva-Chat_x64.app.tar.gz",
+              "linux-x86_64": "*.AppImage",
+          }
+          platforms = {}
+          for key, pattern in wanted.items():
+              files = glob.glob(os.path.join("out", pattern))
+              if len(files) != 1:
+                  raise SystemExit(f"{key}: expected one {pattern}, found {files}")
+              name = os.path.basename(files[0])
+              sig = open(os.path.join("sigs", name + ".sig")).read().strip()
+              platforms[key] = {"signature": sig, "url": base + name}
+          latest = {
+              "version": tag.lstrip("v"),
+              "notes": f"Sylva Chat {tag.lstrip('v')}",
+              "pub_date": datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+              "platforms": platforms,
+          }
+          json.dump(latest, open("out/latest.json", "w"), indent=2)
+          PY
+          fi
+          ls -la out
+      - uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref_type == 'tag' && github.ref_name || steps.version.outputs.tag }}
+          target_commitish: ${{ github.sha }}
+          name: Sylva Chat ${{ github.ref_type == 'tag' && github.ref_name || steps.version.outputs.tag }}
+          body: |
+            Windows: download `Sylva-Chat_*_x64-setup.exe` and run it. It is not code signed yet, so if SmartScreen warns, click More info, then Run anyway.
+            macOS: the `.dmg` (`aarch64` for Apple Silicon, `x64` for Intel). Not notarized yet: the first time, right click Sylva Chat in Applications and choose Open.
+            Linux: the `.AppImage`, `.deb` or `.rpm`.
+            Installed copies update themselves: click Update at the top when it appears.
+          files: out/*
+          fail_on_unmatched_files: true
