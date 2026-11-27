@@ -32,7 +32,7 @@ pub struct AppState {
 #[serde(rename_all = "camelCase")]
 pub struct Session {
     user: Option<User>,
-    /// Client ID to suggest on the sign-in screen (the one Sylva Desktop uses).
+    /// Client ID to suggest on the sign-in screen (the one Sylva Control uses).
     suggested_client_id: Option<String>,
 }
 

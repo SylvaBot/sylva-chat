@@ -13,7 +13,7 @@ Twitch chat as its own desktop app, in Sylva's look. Built with Tauri 2 and Rust
 
 ## Sign in
 
-Sylva Chat uses Twitch's device sign-in, so it needs a Twitch application with Client Type **Public**. If Sylva Desktop is signed in to Twitch on the same computer, its Client ID is filled in for you. Scopes: `chat:read user:write:chat moderator:manage:banned_users moderator:manage:chat_messages`. Tokens live in the operating system's credential store under `app.sylva.chat`.
+Sylva Chat uses Twitch's device sign-in, so it needs a Twitch application with Client Type **Public**. If Sylva Control is signed in to Twitch on the same computer, its Client ID is filled in for you. Scopes: `chat:read user:write:chat moderator:manage:banned_users moderator:manage:chat_messages`. Tokens live in the operating system's credential store under `app.sylva.chat`.
 
 ## Develop
 

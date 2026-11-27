@@ -1,11 +1,11 @@
 //! Sylva Chat keeps its Twitch sign-in in the operating system's credential store, apart from
-//! Sylva Desktop's, because it asks Twitch for chat and moderation permissions.
+//! Sylva Control's, because it asks Twitch for chat and moderation permissions.
 
 use crate::twitch::TwitchTokens;
 
 const SERVICE: &str = "app.sylva.chat";
 const TWITCH: &str = "twitch-tokens";
-/// Sylva Desktop's store, read only to suggest the Client ID it already uses.
+/// Sylva Control's store, read only to suggest the Client ID it already uses.
 const DESKTOP_SERVICE: &str = "app.pine.desktop";
 
 fn entry(service: &str, name: &str) -> Result<keyring::Entry, String> {
@@ -38,7 +38,7 @@ pub fn clear_twitch() -> Result<(), String> {
     }
 }
 
-/// The Client ID Sylva Desktop signed in to Twitch with, if it has one.
+/// The Client ID Sylva Control signed in to Twitch with, if it has one.
 pub fn desktop_client_id() -> Option<String> {
     let s = read(DESKTOP_SERVICE, TWITCH).ok()??;
     let t: TwitchTokens = serde_json::from_str(&s).ok()?;
