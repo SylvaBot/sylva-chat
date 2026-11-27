@@ -1,0 +1,31 @@
+[package]
+name = "sylva-chat"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+description = "Sylva Chat: fast Twitch chat with 7TV, BTTV and FFZ emotes and moderation."
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = [] }
+tauri-plugin-opener = "2"
+tauri-plugin-updater = "2"
+tauri-plugin-window-state = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time"] }
+tokio-util = "0.7"
+log = "0.4"
+reqwest = { version = "0.12", default-features = false, features = ["json", "native-tls", "http2"] }
+url = "2"
+keyring = { version = "3", features = ["apple-native", "windows-native", "sync-secret-service", "crypto-rust"] }
+
+[target.'cfg(windows)'.dependencies]
+windows = { version = "0.62", features = ["Win32_Foundation", "Win32_Graphics_Gdi", "Win32_UI_WindowsAndMessaging"] }
+
+[profile.release]
+lto = true
+codegen-units = 1
+strip = true

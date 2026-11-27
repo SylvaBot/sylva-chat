@@ -1,0 +1,121 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Sylva Chat</title>
+  <link rel="preload" href="fonts/geist-wght.woff2" as="font" type="font/woff2" crossorigin />
+  <link rel="stylesheet" href="styles.css" />
+  <script src="app.js" defer></script>
+</head>
+<body>
+<svg width="0" height="0" style="position:absolute" aria-hidden="true"><defs>
+<!-- Icons from Phosphor Icons (phosphoricons.com), MIT license: see LICENSE-Phosphor.txt -->
+<symbol id="i-x" viewBox="0 0 256 256" fill="currentColor"><path d="M208.49,191.51a12,12,0,0,1-17,17L128,145,64.49,208.49a12,12,0,0,1-17-17L111,128,47.51,64.49a12,12,0,0,1,17-17L128,111l63.51-63.52a12,12,0,0,1,17,17L145,128Z"/></symbol>
+<symbol id="i-minus" viewBox="0 0 256 256" fill="currentColor"><path d="M228,128a12,12,0,0,1-12,12H40a12,12,0,0,1,0-24H216A12,12,0,0,1,228,128Z"/></symbol>
+<symbol id="i-square" viewBox="0 0 256 256" fill="currentColor"><path d="M208,28H48A20,20,0,0,0,28,48V208a20,20,0,0,0,20,20H208a20,20,0,0,0,20-20V48A20,20,0,0,0,208,28Zm-4,176H52V52H204Z"/></symbol>
+<symbol id="i-trash" viewBox="0 0 256 256" fill="currentColor"><path d="M216,48H176V40a24,24,0,0,0-24-24H104A24,24,0,0,0,80,40v8H40a8,8,0,0,0,0,16h8V208a16,16,0,0,0,16,16H192a16,16,0,0,0,16-16V64h8a8,8,0,0,0,0-16ZM112,168a8,8,0,0,1-16,0V104a8,8,0,0,1,16,0Zm48,0a8,8,0,0,1-16,0V104a8,8,0,0,1,16,0Zm0-120H96V40a8,8,0,0,1,8-8h48a8,8,0,0,1,8,8Z"/></symbol>
+<symbol id="i-clock" viewBox="0 0 256 256" fill="currentColor"><path d="M128,24A104,104,0,1,0,232,128,104.11,104.11,0,0,0,128,24Zm56,112H128a8,8,0,0,1-8-8V72a8,8,0,0,1,16,0v48h48a8,8,0,0,1,0,16Z"/></symbol>
+<symbol id="i-ban" viewBox="0 0 256 256" fill="currentColor"><path d="M200,128a71.69,71.69,0,0,1-15.78,44.91L83.09,71.78A71.95,71.95,0,0,1,200,128ZM56,128a71.95,71.95,0,0,0,116.91,56.22L71.78,83.09A71.69,71.69,0,0,0,56,128Zm180,0A108,108,0,1,1,128,20,108.12,108.12,0,0,1,236,128Zm-20,0a88,88,0,1,0-88,88A88.1,88.1,0,0,0,216,128Z"/></symbol>
+<symbol id="i-reply" viewBox="0 0 256 256" fill="currentColor"><path d="M236,200a12,12,0,0,1-24,0,84.09,84.09,0,0,0-84-84H61l27.52,27.51a12,12,0,0,1-17,17l-48-48a12,12,0,0,1,0-17l48-48a12,12,0,0,1,17,17L61,92h67A108.12,108.12,0,0,1,236,200Z"/></symbol>
+<symbol id="i-send" viewBox="0 0 256 256" fill="currentColor"><path d="M240,127.89a16,16,0,0,1-8.18,14L63.9,237.9A16.15,16.15,0,0,1,56,240a16,16,0,0,1-15-21.33l27-79.95A4,4,0,0,1,71.72,136H144a8,8,0,0,0,8-8.53,8.19,8.19,0,0,0-8.26-7.47h-72a4,4,0,0,1-3.79-2.72l-27-79.94A16,16,0,0,1,63.84,18.07l168,95.89A16,16,0,0,1,240,127.89Z"/></symbol>
+<symbol id="i-pin" viewBox="0 0 256 256" fill="currentColor"><path d="M235.33,104l-53.47,53.65c4.56,12.67,6.45,33.89-13.19,60A15.93,15.93,0,0,1,157,224c-.38,0-.75,0-1.13,0a16,16,0,0,1-11.32-4.69L96.29,171,53.66,213.66a8,8,0,0,1-11.32-11.32L85,159.71l-48.3-48.3A16,16,0,0,1,38,87.63c25.42-20.51,49.75-16.48,60.4-13.14L152,20.7a16,16,0,0,1,22.63,0l60.69,60.68A16,16,0,0,1,235.33,104Z"/></symbol>
+<symbol id="i-down" viewBox="0 0 256 256" fill="currentColor"><path d="M208.49,152.49l-72,72a12,12,0,0,1-17,0l-72-72a12,12,0,0,1,17-17L116,187V40a12,12,0,0,1,24,0V187l51.51-51.52a12,12,0,0,1,17,17Z"/></symbol>
+<symbol id="i-logout" viewBox="0 0 256 256" fill="currentColor"><path d="M124,216a12,12,0,0,1-12,12H48a12,12,0,0,1-12-12V40A12,12,0,0,1,48,28h64a12,12,0,0,1,0,24H60V204h52A12,12,0,0,1,124,216Zm108.49-96.49-40-40a12,12,0,0,0-17,17L195,116H112a12,12,0,0,0,0,24h83l-19.52,19.51a12,12,0,0,0,17,17l40-40A12,12,0,0,0,232.49,119.51Z"/></symbol>
+<symbol id="i-update" viewBox="0 0 256 256" fill="currentColor"><path d="M224,144v64a8,8,0,0,1-8,8H40a8,8,0,0,1-8-8V144a8,8,0,0,1,16,0v56H208V144a8,8,0,0,1,16,0Zm-101.66,5.66a8,8,0,0,0,11.32,0l40-40A8,8,0,0,0,168,96H136V32a8,8,0,0,0-16,0V96H88a8,8,0,0,0-5.66,13.66Z"/></symbol>
+<symbol id="i-twitch" viewBox="0 0 256 256" fill="currentColor"><path d="M208,32H48A16,16,0,0,0,32,48V192a16,16,0,0,0,16,16H64v32a8,8,0,0,0,13.12,6.15L122.9,208h42.2a16,16,0,0,0,10.25-3.71l42.89-35.75A15.93,15.93,0,0,0,224,156.25V48A16,16,0,0,0,208,32ZM128,136a8,8,0,0,1-16,0V88a8,8,0,0,1,16,0Zm48,0a8,8,0,0,1-16,0V88a8,8,0,0,1,16,0Z"/></symbol>
+<symbol id="i-user" viewBox="0 0 256 256" fill="currentColor"><path d="M230.93,220a8,8,0,0,1-6.93,4H32a8,8,0,0,1-6.92-12c15.23-26.33,38.7-45.21,66.09-54.16a72,72,0,1,1,73.66,0c27.39,8.95,50.86,27.83,66.09,54.16A8,8,0,0,1,230.93,220Z"/></symbol>
+<symbol id="i-external" viewBox="0 0 256 256" fill="currentColor"><path d="M228,104a12,12,0,0,1-24,0V69l-59.51,59.51a12,12,0,0,1-17-17L187,52H152a12,12,0,0,1,0-24h64a12,12,0,0,1,12,12Zm-44,24a12,12,0,0,0-12,12v64H52V84h64a12,12,0,0,0,0-24H48A20,20,0,0,0,28,80V208a20,20,0,0,0,20,20H176a20,20,0,0,0,20-20V140A12,12,0,0,0,184,128Z"/></symbol>
+<symbol id="i-check" viewBox="0 0 256 256" fill="currentColor"><path d="M128,24A104,104,0,1,0,232,128,104.11,104.11,0,0,0,128,24Zm45.66,85.66-56,56a8,8,0,0,1-11.32,0l-24-24a8,8,0,0,1,11.32-11.32L112,148.69l50.34-50.35a8,8,0,0,1,11.32,11.32Z"/></symbol>
+</defs></svg>
+<div class="app">
+  <header class="titlebar" data-drag-region>
+    <div class="tb-brand" data-drag-region>
+      <svg class="leaf" viewBox="17 10 30 42" aria-hidden="true" data-drag-region><path class="leaf-body" d="M32 12c-9 8-13 17-13 25a13 13 0 0 0 26 0c0-8-4-17-13-25z" /><path class="leaf-vein" d="M32 22v30M32 38l-7-6M32 44l7-6" stroke-width="2.6" stroke-linecap="round" fill="none" /></svg>
+      <span data-drag-region>Sylva Chat</span>
+      <span class="tag mono" id="channel-tag" data-drag-region hidden></span>
+    </div>
+    <div class="tb-fill" data-drag-region></div>
+    <button class="btn sm ghost" id="update-btn" type="button" hidden><svg><use href="#i-update"/></svg>Update</button>
+    <button class="win-btn" id="pin-btn" type="button" title="Keep on top" aria-label="Keep on top" aria-pressed="false"><svg><use href="#i-pin"/></svg></button>
+    <button class="win-btn" id="account-btn" type="button" title="Account" aria-label="Account" aria-haspopup="menu" hidden><svg><use href="#i-user"/></svg></button>
+    <div class="win">
+      <button class="win-btn" id="win-min" type="button" title="Minimize" aria-label="Minimize"><svg><use href="#i-minus"/></svg></button>
+      <button class="win-btn" id="win-max" type="button" title="Maximize" aria-label="Maximize"><svg><use href="#i-square"/></svg></button>
+      <button class="win-btn close" id="win-close" type="button" title="Close" aria-label="Close"><svg><use href="#i-x"/></svg></button>
+    </div>
+  </header>
+
+  <main class="panel">
+    <section class="chat" id="chat-view" hidden>
+      <div class="list" id="list" role="log" aria-live="off" aria-label="Chat"></div>
+      <p class="loading" id="loading">Loading chat</p>
+      <button class="jump" id="jump" type="button" hidden><svg><use href="#i-down"/></svg><span id="jump-text">New messages</span></button>
+      <form class="composer" id="composer" autocomplete="off">
+        <div class="reply-bar" id="reply-bar" hidden>
+          <svg><use href="#i-reply"/></svg><span id="reply-text"></span>
+          <button class="icon-btn" id="reply-cancel" type="button" title="Cancel reply" aria-label="Cancel reply"><svg><use href="#i-x"/></svg></button>
+        </div>
+        <div class="send-row">
+          <input class="input" id="input" maxlength="500" spellcheck="true" placeholder="Send a message" aria-label="Message" />
+          <button class="btn primary send" id="send" type="submit" title="Send" aria-label="Send"><svg><use href="#i-send"/></svg></button>
+        </div>
+      </form>
+    </section>
+
+    <section class="signin" id="signin-view" hidden>
+      <div class="signin-card">
+        <h1>Sign in to Twitch</h1>
+        <p class="lede">Sylva Chat reads your chat, sends messages as you, and deletes, times out and bans for you.</p>
+        <p class="hint" id="cid-hint">Sylva Control's Client ID is filled in. Keep it, or paste another.</p>
+        <ol class="steps" id="cid-steps">
+          <li><span class="step-n">1</span><span>Open <a href="#" data-ext="https://dev.twitch.tv/console/apps">dev.twitch.tv/console/apps</a> and register an application.</span></li>
+          <li><span class="step-n">2</span><span>Set Client Type to <b>Public</b>. For the redirect URL, use http://localhost.</span></li>
+          <li><span class="step-n">3</span><span>Paste the Client ID below.</span></li>
+        </ol>
+        <label class="field"><span>Client ID</span><input class="input mono" id="client-id" autocomplete="off" spellcheck="false" placeholder="a1b2c3d4..." /></label>
+        <button class="btn primary lg" type="button" id="connect"><svg><use href="#i-twitch"/></svg>Continue on Twitch</button>
+        <div class="device-code" id="code-box" hidden>
+          <p>Enter this code on the Twitch page that opened:</p>
+          <div class="code mono" id="user-code"></div>
+          <p class="hint">Waiting for you to approve. <a href="#" id="open-again">Open the page again</a> or <a href="#" id="cancel-signin">cancel</a>.</p>
+        </div>
+      </div>
+    </section>
+  </main>
+</div>
+
+<div class="rail" id="rail" hidden>
+  <button type="button" data-act="reply" title="Reply" aria-label="Reply"><svg><use href="#i-reply"/></svg></button>
+  <button type="button" data-act="delete" title="Delete message" aria-label="Delete message"><svg><use href="#i-trash"/></svg></button>
+  <button type="button" data-act="timeout" title="Time out for 10 minutes" aria-label="Time out for 10 minutes"><svg><use href="#i-clock"/></svg></button>
+  <button type="button" data-act="ban" title="Ban" aria-label="Ban"><svg><use href="#i-ban"/></svg><span>Ban?</span></button>
+</div>
+
+<div class="card" id="card" role="dialog" aria-label="Chatter" hidden>
+  <div class="card-head">
+    <div class="card-name" id="card-name"></div>
+    <button class="icon-btn" id="card-close" type="button" title="Close" aria-label="Close"><svg><use href="#i-x"/></svg></button>
+  </div>
+  <p class="card-sub mono" id="card-login"></p>
+  <div class="card-acts" id="card-acts">
+    <button class="btn sm" type="button" data-timeout="60">1m</button>
+    <button class="btn sm" type="button" data-timeout="600">10m</button>
+    <button class="btn sm" type="button" data-timeout="3600">1h</button>
+    <button class="btn sm" type="button" data-timeout="86400">1d</button>
+    <button class="btn sm danger" type="button" data-card="ban"><svg><use href="#i-ban"/></svg>Ban</button>
+    <button class="btn sm" type="button" data-card="unban">Unban</button>
+  </div>
+  <p class="card-label">Recent messages</p>
+  <div class="card-msgs" id="card-msgs"></div>
+  <button class="btn sm ghost" type="button" id="card-twitch"><svg><use href="#i-external"/></svg>Viewer card on Twitch</button>
+</div>
+
+<div class="menu" id="menu" role="menu" hidden>
+  <p class="menu-who" id="menu-who"></p>
+  <button type="button" role="menuitem" id="sign-out"><svg><use href="#i-logout"/></svg>Sign out</button>
+</div>
+
+<div class="toasts" id="toasts" aria-live="assertive"></div>
+</body>
+</html>
