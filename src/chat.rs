@@ -20,7 +20,6 @@ use tokio_tungstenite::tungstenite::Message as WsMessage;
 use tokio_util::sync::CancellationToken;
 
 const IRC_URL: &str = "wss://irc-ws.chat.twitch.tv:443";
-const HISTORY: u32 = 150;
 /// Twitch pings every few minutes; silence for longer means the socket died quietly.
 const SILENCE: Duration = Duration::from_secs(6 * 60);
 const BATCH_EVERY: Duration = Duration::from_millis(50);
@@ -218,7 +217,11 @@ fn is_auth_failure(text: &str) -> bool {
 }
 
 async fn load_history(http: &reqwest::Client, shared: &Shared, tx: &Tx) {
-    let url = format!("https://recent-messages.robotty.de/api/v2/recent-messages/{}?limit={HISTORY}", shared.channel_login);
+    let prefs = crate::settings::get();
+    if !prefs.load_history {
+        return;
+    }
+    let url = format!("https://recent-messages.robotty.de/api/v2/recent-messages/{}?limit={}", shared.channel_login, prefs.history_limit.clamp(1, 800));
     let body: Value = match http.get(&url).send().await {
         Ok(r) if r.status().is_success() => r.json().await.unwrap_or(Value::Null),
         _ => return,

@@ -17,9 +17,12 @@ use eframe::egui::{
 };
 use eframe::egui::text::{LayoutJob, TextFormat};
 use crate::live::{HypeTrain, Live, Participant, Poll, Prediction, TrainKind};
-use std::collections::{HashSet, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::mpsc::Receiver;
 use std::sync::Arc;
+
+mod prefs;
+use prefs::PrefsTab;
 
 const MAX_ROWS: usize = 600;
 const MAX_HELD: usize = 2000;
@@ -36,6 +39,8 @@ enum ItemKind {
     Galley(Arc<Galley>),
     Image { url: String, layers: Vec<(String, egui::Vec2)>, tip: Option<Arc<Tip>> },
     Chip(Arc<Galley>),
+    /// A label with its own color: why a message stands out.
+    Tag(Arc<Galley>, Color32),
     Icon(&'static str),
 }
 
@@ -94,11 +99,46 @@ struct Layout {
     card: Option<Rect>,
 }
 
+/// Why a message stands out, each with its own color and label.
+#[derive(Clone, Copy, PartialEq, Default)]
+enum Mark {
+    #[default]
+    None,
+    FirstStream,
+    FirstEver,
+    Suspicious,
+    Restricted,
+}
+
+impl Mark {
+    fn label(self) -> Option<&'static str> {
+        match self {
+            Mark::None => None,
+            Mark::FirstStream => Some("First this stream"),
+            Mark::FirstEver => Some("First message ever"),
+            Mark::Suspicious => Some("Suspicious"),
+            Mark::Restricted => Some("Restricted"),
+        }
+    }
+    fn color(self) -> Color32 {
+        match self {
+            Mark::None => TEXT,
+            Mark::FirstStream => Color32::from_rgb(0x6c, 0xa8, 0xf0),
+            Mark::FirstEver => Color32::from_rgb(0xe6, 0xb4, 0x4c),
+            Mark::Suspicious => Color32::from_rgb(0xea, 0x8a, 0x4a),
+            Mark::Restricted => Color32::from_rgb(0xf5, 0x6a, 0x6e),
+        }
+    }
+}
+
 struct Row {
     seq: u64,
     ev: ChatEvent,
     gone: bool,
     layout: Option<Layout>,
+    mark: Mark,
+    /// A blocked user's message, shown faded because blocked messages are set to show.
+    faded: bool,
 }
 
 impl Row {
@@ -145,7 +185,7 @@ fn plain(parts: &[Part]) -> String {
 fn clock(ms: u64) -> String {
     use chrono::TimeZone;
     let t = if ms == 0 { chrono::Local::now() } else { chrono::Local.timestamp_millis_opt(ms as i64).single().unwrap_or_else(chrono::Local::now) };
-    t.format("%-H:%M").to_string()
+    crate::settings::get().time_text(t)
 }
 
 /// Lays out words, emotes and badges in lines that wrap at `right`.
@@ -205,7 +245,7 @@ impl<'a> Flow<'a> {
             // Emoji show as pictures, so every system shows them in color.
             let mut run = String::new();
             for g in unicode_segmentation::UnicodeSegmentation::graphemes(word, true) {
-                match emoji(g) {
+                match emoji(g).filter(|_| crate::settings::get().twemoji) {
                     Some((url, name)) => {
                         if !run.is_empty() {
                             self.word(std::mem::take(&mut run), &format, width, hit.clone());
@@ -237,14 +277,15 @@ impl<'a> Flow<'a> {
     }
 
     fn emote_size(&mut self, url: &str, w: u32, h: u32) -> egui::Vec2 {
+        let eh = EMOTE_H * crate::settings::get().emote_scale();
         if w > 0 && h > 0 {
-            return vec2(EMOTE_H * w as f32 / h as f32, EMOTE_H);
+            return vec2(eh * w as f32 / h as f32, eh);
         }
         match self.images.get(url) {
-            Some(a) if a.size.y > 0.0 => vec2(EMOTE_H * a.size.x / a.size.y, EMOTE_H),
+            Some(a) if a.size.y > 0.0 => vec2(eh * a.size.x / a.size.y, eh),
             _ => {
                 self.provisional.push(url.to_string());
-                vec2(EMOTE_H, EMOTE_H)
+                vec2(eh, eh)
             }
         }
     }
@@ -262,6 +303,7 @@ fn fmt(font: egui::FontId, color: Color32) -> TextFormat {
 }
 
 fn layout_parts(flow: &mut Flow, parts: &[Part], color: Color32, gone: bool) {
+    let prefs = crate::settings::get();
     let text_color = if gone { FAINT } else { color };
     let strike = |mut f: TextFormat| {
         if gone {
@@ -272,31 +314,87 @@ fn layout_parts(flow: &mut Flow, parts: &[Part], color: Color32, gone: bool) {
     for p in parts {
         match p {
             Part::Text { v } => flow.text(v, strike(fmt(regular(TEXT_SIZE), text_color)), None),
-            Part::Mention { v, login } => flow.text(v, strike(fmt(semibold(TEXT_SIZE), text_color)), Some(Hit::Name(login.clone()))),
+            Part::Mention { v, login } => {
+                let font = if prefs.bold_mentions { semibold(TEXT_SIZE) } else { regular(TEXT_SIZE) };
+                let c = if prefs.color_mentions && !gone { SAGE } else { text_color };
+                flow.text(v, strike(fmt(font, c)), Some(Hit::Name(login.clone())))
+            }
             Part::Link { v, url } => {
                 let mut f = fmt(regular(TEXT_SIZE), if gone { FAINT } else { SAGE });
                 f.underline = Stroke::new(1.0, Color32::from_rgba_unmultiplied(0xd6, 0xef, 0xc2, 100));
                 flow.text(v, strike(f), Some(Hit::Link(url.clone())));
             }
             Part::Emote { code, e, layers } => {
-                let tip = Some(Arc::new(Tip { name: code.clone(), by: e.by.to_string(), big: big_url(&e.src, &e.srcset) }));
+                if !prefs.emotes {
+                    let mut all = code.clone();
+                    for l in layers {
+                        all.push(' ');
+                        all.push_str(&l.code);
+                    }
+                    all.push(' ');
+                    flow.text(&all, strike(fmt(regular(TEXT_SIZE), text_color)), None);
+                    continue;
+                }
+                let tip = if prefs.hover_cards { Some(Arc::new(Tip { name: code.clone(), by: e.by.to_string(), big: big_url(&e.src, &e.srcset) })) } else { None };
                 let layers = layers.iter().map(|l| (l.e.src.clone(), vec2(l.e.w as f32, l.e.h as f32))).collect();
                 flow.dim = gone;
                 flow.emote(&e.src, e.w, e.h, layers, 0.0, tip);
                 flow.dim = false;
                 // Keep a normal space after an emote.
-                flow.x += 4.0;
+                if prefs.emote_gap {
+                    flow.x += 4.0;
+                }
             }
         }
     }
 }
 
+/// Which of the "visible badges" groups a badge falls in.
+fn badge_visible(prefs: &crate::settings::Settings, title: &str) -> bool {
+    let t = title.to_lowercase();
+    if ["broadcaster", "moderator", "vip", "staff", "admin", "global moderator", "lead moderator"].iter().any(|k| t == *k) {
+        prefs.badge_authority
+    } else if t.starts_with("predicted") || t.contains("prediction") {
+        prefs.badge_prediction
+    } else if t.contains("subscriber") || t.contains("founder") {
+        prefs.badge_subscriber
+    } else {
+        prefs.badge_vanity
+    }
+}
+
+/// A deleted message cut to `n` characters.
+fn shorten(parts: &[Part], n: usize) -> Vec<Part> {
+    let mut left = n;
+    let mut out = Vec::new();
+    for p in parts {
+        let len = match p {
+            Part::Text { v } | Part::Link { v, .. } | Part::Mention { v, .. } => v.chars().count(),
+            Part::Emote { .. } => 2,
+        };
+        if len <= left {
+            left -= len;
+            out.push(p.clone());
+            continue;
+        }
+        if let Part::Text { v } = p {
+            out.push(Part::Text { v: format!("{}…", v.chars().take(left).collect::<String>()) });
+        }
+        break;
+    }
+    out
+}
+
 fn layout_row(row: &Row, width: f32, painter: &egui::Painter, images: &Images) -> Layout {
     let right = width - PAD_X;
+    let prefs = crate::settings::get();
+    if row.gone && prefs.hide_deleted && matches!(row.ev, ChatEvent::Msg { .. }) {
+        return Layout { width, height: 0.0, items: vec![], provisional: vec![], card: None };
+    }
     match &row.ev {
         ChatEvent::Msg { login, name, color, badges, parts, action, first, reply, ts, source, paid, .. } => {
             let mut flow = Flow::new(painter, images, PAD_X, right, 3.0);
-            if let Some(r) = reply {
+            if let Some(r) = reply.as_ref().filter(|_| prefs.reply_context) {
                 let mut job = LayoutJob::single_section(format!("Replying to @{}: {}", r.name, r.body), fmt(regular(12.0), FAINT));
                 job.wrap.max_width = right - PAD_X - 22.0;
                 job.wrap.max_rows = 1;
@@ -306,14 +404,20 @@ fn layout_row(row: &Row, width: f32, painter: &egui::Painter, images: &Images) -
                 flow.items.push(Item { rect: Rect::from_min_size(pos2(PAD_X + 22.0, flow.y), g.size()), kind: ItemKind::Galley(g), hit: None, dim: false });
                 flow.y += 18.0;
             }
-            let ts = painter.layout_no_wrap(clock(*ts), mono(11.0), FAINT);
-            flow.place(ts.size(), ItemKind::Galley(ts), None, 6.0);
-            let chips = [first.then(|| "First message".to_string()), source.clone(), paid.as_ref().map(|p| format!("Hype Chat {p}"))];
+            if prefs.timestamps {
+                let ts = painter.layout_no_wrap(clock(*ts), mono(11.0), FAINT);
+                flow.place(ts.size(), ItemKind::Galley(ts), None, 6.0);
+            }
+            if let Some(label) = row.mark.label() {
+                let g = painter.layout_no_wrap(label.to_string(), medium(11.0), row.mark.color());
+                flow.place(g.size() + vec2(12.0, 18.0 - g.size().y), ItemKind::Tag(g, row.mark.color()), None, 6.0);
+            }
+            let chips = [(*first && row.mark == Mark::None).then(|| "First message".to_string()), source.clone().filter(|_| prefs.shared_badge), paid.as_ref().map(|p| format!("Hype Chat {p}"))];
             for c in chips.into_iter().flatten() {
                 let g = painter.layout_no_wrap(c, medium(11.0), TEXT_2);
                 flow.place(g.size() + vec2(12.0, 18.0 - g.size().y), ItemKind::Chip(g), None, 6.0);
             }
-            for b in badges {
+            for b in badges.iter().filter(|b| badge_visible(&prefs, &b.title)) {
                 flow.place(vec2(BADGE, BADGE), ItemKind::Image { url: b.src.clone(), layers: Vec::new(), tip: Some(Arc::new(Tip { name: b.title.clone(), by: "Badge".into(), big: big_url(&b.src, &b.srcset) })) }, None, 4.0);
             }
             let name_color = theme::parse_hex(color);
@@ -325,8 +429,15 @@ fn layout_row(row: &Row, width: f32, painter: &egui::Painter, images: &Images) -
             } else {
                 flow.x += 5.0;
             }
-            let body_color = if *action { name_color } else if row_is_old(&row.ev) { TEXT_2 } else { TEXT };
-            layout_parts(&mut flow, parts, body_color, row.gone);
+            let body_color = if *action { name_color } else if (row_is_old(&row.ev) && prefs.dim_history) || row.faded { TEXT_2 } else { TEXT };
+            let cut;
+            let shown: &[Part] = if row.gone && prefs.deleted_len > 0 {
+                cut = shorten(parts, prefs.deleted_len as usize);
+                &cut
+            } else {
+                parts
+            };
+            layout_parts(&mut flow, shown, body_color, row.gone);
             let (items, h, provisional) = flow.finish();
             Layout { width, height: h + 3.0, items, provisional, card: None }
         }
@@ -389,6 +500,20 @@ struct Card {
     ban_armed_until: f64,
 }
 
+/// The right-click menu on a message.
+struct CtxMenu {
+    seq: u64,
+    at: Pos2,
+    open: MenuOpen,
+}
+
+#[derive(Clone, Copy, PartialEq)]
+enum MenuOpen {
+    None,
+    Moderate,
+    Pin,
+}
+
 struct Completion {
     start: usize,
     after: String,
@@ -412,10 +537,15 @@ pub struct App {
     at_bottom: bool,
     jump: bool,
     loading: bool,
-    hover_row: Option<u64>,
-    rail_rect: Option<Rect>,
-    ban_armed: Option<(u64, f64)>,
+    ctx_menu: Option<CtxMenu>,
     card: Option<Card>,
+    /// Everyone's messages this session, newest last, for the user card to scroll back through.
+    history: HashMap<String, VecDeque<ChatEvent>>,
+    /// Logins that already chatted this stream, and those Twitch flagged.
+    chatted: HashSet<String>,
+    flagged: HashMap<String, Mark>,
+    prefs_open: Option<PrefsTab>,
+    prefs_draft: crate::settings::Settings,
     composer: String,
     reply: Option<(String, String)>,
     sent: Vec<String>,
@@ -453,6 +583,8 @@ struct Pin {
     name: String,
     color: Color32,
     text: String,
+    /// Ms since 1970 when it comes down by itself; None stays until unpinned.
+    until: Option<u64>,
 }
 
 fn wall_ms() -> u64 {
@@ -522,6 +654,7 @@ fn train_tint(k: TrainKind) -> Color32 {
 }
 
 const PINNED_KEY: &str = "pinned";
+const SETTINGS_KEY: &str = "settings";
 const CLIENT_KEY: &str = "client-id";
 
 impl App {
@@ -535,6 +668,9 @@ impl App {
         });
         let backend = Backend::new(notify);
         let pinned = cc.storage.and_then(|s| s.get_string(PINNED_KEY)).as_deref() == Some("1");
+        if let Some(json) = cc.storage.and_then(|s| s.get_string(SETTINGS_KEY)) {
+            crate::settings::load(&json);
+        }
         let saved_client_id = cc.storage.and_then(|s| s.get_string(CLIENT_KEY)).unwrap_or_default();
         if pinned {
             cc.egui_ctx.send_viewport_cmd(ViewportCommand::WindowLevel(egui::WindowLevel::AlwaysOnTop));
@@ -566,10 +702,13 @@ impl App {
             at_bottom: true,
             jump: false,
             loading: true,
-            hover_row: None,
-            rail_rect: None,
-            ban_armed: None,
+            ctx_menu: None,
             card: None,
+            history: HashMap::new(),
+            chatted: HashSet::new(),
+            flagged: HashMap::new(),
+            prefs_open: None,
+            prefs_draft: crate::settings::get().as_ref().clone(),
             composer: String::new(),
             reply: None,
             sent: Vec::new(),
@@ -677,7 +816,77 @@ impl App {
         }
     }
 
-    fn apply(&mut self, ev: ChatEvent) {
+    fn apply(&mut self, mut ev: ChatEvent) {
+        let prefs = crate::settings::get();
+        let mut mark = Mark::None;
+        let mut faded = false;
+        match &mut ev {
+            ChatEvent::StreamStart => {
+                self.chatted.clear();
+                return;
+            }
+            ChatEvent::Suspicious { login, status } => {
+                let m = match status.as_str() {
+                    "restricted" => Mark::Restricted,
+                    "active_monitoring" => Mark::Suspicious,
+                    _ => Mark::None,
+                };
+                if m == Mark::None {
+                    self.flagged.remove(login.as_str());
+                } else {
+                    self.flagged.insert(login.clone(), m);
+                }
+                // The line this arrives with is already in chat: mark that person's latest.
+                if let Some(r) = self.rows.iter_mut().chain(self.held.iter_mut()).rev().find(|r| r.login() == Some(login.as_str()) && matches!(r.ev, ChatEvent::Msg { .. })) {
+                    r.mark = m;
+                    r.layout = None;
+                }
+                return;
+            }
+            ChatEvent::Msg { login, parts, old, first, id, .. } => {
+                let blocked = prefs.is_blocked(login);
+                if blocked && !prefs.show_blocked {
+                    return;
+                }
+                faded = blocked;
+                // Patterns: drop the line, or swap the matching words.
+                if !prefs.patterns.is_empty() {
+                    let mut drop = false;
+                    for part in parts.iter_mut() {
+                        if let Part::Text { v } = part {
+                            let (t, d) = crate::settings::apply_patterns(&prefs, v);
+                            *v = t;
+                            drop |= d;
+                        }
+                    }
+                    if drop || crate::settings::apply_patterns(&prefs, &plain(parts)).1 {
+                        return;
+                    }
+                }
+                if !prefs.no_highlight.contains(login.as_str()) {
+                    if *first && prefs.hl_first_ever {
+                        mark = Mark::FirstEver;
+                    } else if !*old && !*first && prefs.hl_first_stream && !self.chatted.contains(login.as_str()) {
+                        mark = Mark::FirstStream;
+                    }
+                    if prefs.hl_suspicious {
+                        if let Some(m) = self.flagged.get(login.as_str()) {
+                            mark = *m;
+                        }
+                    }
+                }
+                self.chatted.insert(login.clone());
+                let _ = id;
+                // Keep each person's messages for their card.
+                let limit = prefs.usercard_limit.max(1) as usize;
+                let h = self.history.entry(login.clone()).or_default();
+                h.push_back(ev.clone());
+                while h.len() > limit {
+                    h.pop_front();
+                }
+            }
+            _ => {}
+        }
         let all = self.rows.iter_mut().chain(self.held.iter_mut());
         match &ev {
             ChatEvent::Deleted { id } => {
@@ -719,7 +928,7 @@ impl App {
             _ => {}
         }
         self.seq += 1;
-        self.held.push_back(Row { seq: self.seq, ev, gone: false, layout: None });
+        self.held.push_back(Row { seq: self.seq, ev, gone: false, layout: None, mark, faded });
         if self.held.len() > MAX_HELD {
             self.held.pop_front();
         }
@@ -857,6 +1066,9 @@ impl App {
                     ui.label(job);
                 });
                 ui.add_space(4.0);
+                if menu_item(ui, &self.icons, "star", "Preferences").clicked() {
+                    self.open_prefs();
+                }
                 if menu_item(ui, &self.icons, "logout", "Sign out").clicked() {
                     self.menu = false;
                     let b = self.backend.clone();
@@ -977,14 +1189,11 @@ impl App {
         // Pause while the pointer moves over chat.
         let pointer = ctx.input(|i| i.pointer.hover_pos());
         if let Some(p) = pointer {
-            if list_rect.contains(p) && ctx.input(|i| i.pointer.delta() != egui::Vec2::ZERO) {
-                self.pause_until = now + 1.2;
-            }
-            if self.rail_rect.is_some_and(|r| r.expand(2.0).contains(p)) {
+            if crate::settings::get().pause_on_hover && list_rect.contains(p) && ctx.input(|i| i.pointer.delta() != egui::Vec2::ZERO) {
                 self.pause_until = now + 1.2;
             }
         }
-        if pointer.is_none_or(|p| !list_rect.contains(p)) && self.card.is_none() {
+        if pointer.is_none_or(|p| !list_rect.contains(p)) && self.card.is_none() && self.ctx_menu.is_none() {
             self.pause_until = self.pause_until.min(now);
         }
         self.release_held(now);
@@ -1012,7 +1221,7 @@ impl App {
         let total: f32 = self.rows.iter().map(|r| r.layout.as_ref().map_or(0.0, |l| l.height)).sum::<f32>() + 16.0;
 
         let mut clicked: Option<(Hit, Pos2)> = None;
-        let mut hovered_row: Option<(u64, Rect)> = None;
+        let mut opened: Option<(u64, Pos2)> = None;
         let mut next_frame: Option<u64> = None;
         let mut hover_tip: Option<(Arc<Tip>, Rect, String)> = None;
         let now_ms = (now * 1000.0) as u64;
@@ -1022,6 +1231,7 @@ impl App {
             area = area.vertical_scroll_offset(total);
         }
         let mut at_bottom = self.at_bottom;
+        let prefs = crate::settings::get();
         ui.scope_builder(UiBuilder::new().max_rect(list_rect), |ui| {
             let out = area.show_viewport(ui, |ui, viewport| {
                 ui.set_min_height(total);
@@ -1037,17 +1247,22 @@ impl App {
                     }
                     let rrect = Rect::from_min_size(origin + vec2(0.0, top), vec2(width, l.height));
                     let resp = ui.interact(rrect, Id::unique(("row", row.seq)), Sense::click());
-                    let is_hover = resp.hovered() || self.hover_row == Some(row.seq) && self.rail_rect.is_some_and(|r| pointer.is_some_and(|p| r.contains(p)));
+                    let is_hover = resp.hovered() || self.ctx_menu.as_ref().is_some_and(|m| m.seq == row.seq);
                     let hl = matches!(row.ev, ChatEvent::Msg { hl: true, .. });
+                    if row.mark != Mark::None {
+                        ui.painter().rect_filled(rrect, 0.0, row.mark.color().gamma_multiply(if is_hover { 0.22 } else { 0.14 }));
+                    } else if prefs.alternate_rows && row.seq % 2 == 0 && l.card.is_none() {
+                        ui.painter().rect_filled(rrect, 0.0, Color32::from_white_alpha(5));
+                    }
+                    if prefs.separators && l.card.is_none() && l.height > 0.0 {
+                        ui.painter().hline(rrect.x_range(), rrect.bottom() - 0.5, Stroke::new(1.0, Color32::from_white_alpha(10)));
+                    }
                     if let Some(card) = l.card {
                         ui.painter().rect_filled(card.translate(rrect.min.to_vec2()), R_ITEM, SURFACE);
                     } else if hl {
                         ui.painter().rect_filled(rrect, 0.0, if is_hover { HL_HOVER } else { TAG_BG });
                     } else if is_hover && row.login().is_some() {
                         ui.painter().rect_filled(rrect, 0.0, ROW_HOVER);
-                    }
-                    if is_hover && row.login().is_some() {
-                        hovered_row = Some((row.seq, rrect));
                     }
                     for it in &l.items {
                         let r = it.rect.translate(rrect.min.to_vec2());
@@ -1056,6 +1271,10 @@ impl App {
                             ItemKind::Chip(g) => {
                                 ui.painter().rect_filled(r, CornerRadius::same(6), SURFACE_2);
                                 ui.painter().galley(r.center() - g.size() / 2.0, g.clone(), TEXT_2);
+                            }
+                            ItemKind::Tag(g, c) => {
+                                ui.painter().rect_filled(r, CornerRadius::same(6), c.gamma_multiply(0.18));
+                                ui.painter().galley(r.center() - g.size() / 2.0, g.clone(), *c);
                             }
                             ItemKind::Icon(name) => {
                                 ui.painter().image(self.icons.get(name).id(), r, uv(), FAINT);
@@ -1069,7 +1288,8 @@ impl App {
                                 let tint = if it.dim { Color32::from_white_alpha(90) } else { Color32::WHITE };
                                 for (u, _) in std::iter::once((url, &egui::Vec2::ZERO)).chain(layers.iter().map(|(u, s)| (u, s))) {
                                     if let Some(a) = self.images.get(u) {
-                                        let (tex, next) = a.frame(now_ms);
+                                        let animate = prefs.animate && (!prefs.animate_focused_only || ctx.input(|i| i.focused));
+                                        let (tex, next) = if animate { a.frame(now_ms) } else { (a.frame(0).0, None) };
                                         let fit = fit_rect(r, a.size);
                                         ui.painter().image(tex.id(), fit, uv(), tint);
                                         if let Some(n) = next {
@@ -1086,9 +1306,8 @@ impl App {
                             }
                         }
                     }
-                    if resp.secondary_clicked() {
-                        ctx.copy_text(row.plain());
-                        self.backend.toast("Copied.", false);
+                    if resp.secondary_clicked() && !matches!(row.ev, ChatEvent::Cleared | ChatEvent::Deleted { .. } | ChatEvent::UserCleared { .. }) {
+                        opened = Some((row.seq, pointer.unwrap_or(rrect.center())));
                     }
                 }
             });
@@ -1102,20 +1321,8 @@ impl App {
             ctx.request_repaint_after(std::time::Duration::from_millis(ms.max(16)));
         }
 
-        // The action rail on the hovered message.
-        let rail_hovered = self.rail_rect.is_some_and(|r| pointer.is_some_and(|p| r.contains(p)));
-        if let Some((seq, rrect)) = hovered_row {
-            self.hover_row = Some(seq);
-            self.rail(ui, seq, rrect, list_rect, now);
-        } else if !rail_hovered {
-            self.hover_row = None;
-            self.rail_rect = None;
-            self.ban_armed = None;
-        } else if let Some(seq) = self.hover_row {
-            if let Some(rr) = self.rail_rect {
-                let rrect = Rect::from_min_max(pos2(list_rect.left(), rr.top() + 14.0), pos2(list_rect.right(), rr.bottom() + 14.0));
-                self.rail(ui, seq, rrect, list_rect, now);
-            }
+        if let Some((seq, at)) = opened {
+            self.ctx_menu = Some(CtxMenu { seq, at, open: MenuOpen::None });
         }
 
         if let Some((hit, at)) = clicked {
@@ -1158,6 +1365,7 @@ impl App {
 
         self.composer(ui, composer_rect);
         self.chatter_card(&ctx, now);
+        self.message_menu(&ctx);
     }
 
     // ---------- Live: hype train, poll, prediction, Shared Chat, pinned ----------
@@ -1194,6 +1402,9 @@ impl App {
         }
         if l.prediction.as_ref().is_some_and(|t| now > t.1) {
             l.prediction = None;
+        }
+        if l.pin.as_ref().is_some_and(|p| p.until.is_some_and(|u| now > u)) {
+            l.pin = None;
         }
         let mut cards = Vec::new();
         let mut timed = false;
@@ -1458,101 +1669,6 @@ impl App {
         card.height()
     }
 
-    fn rail(&mut self, ui: &mut egui::Ui, seq: u64, rrect: Rect, list_rect: Rect, now: f64) {
-        let Some(row) = self.rows.iter().find(|r| r.seq == seq) else { return };
-        let Some(me) = &self.me else { return };
-        let login = row.login().unwrap_or_default().to_string();
-        let id = row.id().map(str::to_string);
-        let own = login == me.login;
-        let mut acts: Vec<(&'static str, &'static str)> = Vec::new();
-        if id.is_some() {
-            acts.push(("reply", "Reply"));
-        }
-        acts.push(("copy", "Copy message"));
-        if matches!(row.ev, ChatEvent::Msg { .. }) {
-            acts.push(("pin", "Pin above chat"));
-        }
-        if id.is_some() && (own || login != me.login) {
-            acts.push(("trash", "Delete message"));
-        }
-        if !own {
-            acts.push(("clock", "Time out for 10 minutes"));
-            acts.push(("ban", "Ban"));
-        }
-        let armed = self.ban_armed.is_some_and(|(s, until)| s == seq && until > now);
-        let ban_w = if armed { 64.0 } else { 28.0 };
-        let w = acts.iter().map(|a| if a.0 == "ban" { ban_w } else { 28.0 }).sum::<f32>() + 2.0 * (acts.len() as f32 - 1.0) + 4.0;
-        let top = (rrect.top() - 14.0).max(list_rect.top() + 2.0);
-        let rail = Rect::from_min_size(pos2(rrect.right() - 12.0 - w, top), vec2(w, 32.0));
-        self.rail_rect = Some(rail);
-        let layer = egui::LayerId::new(Order::Foreground, Id::unique("rail"));
-        let p = ui.ctx().layer_painter(layer);
-        p.add(shadow().as_shape(rail, R_CONTROL));
-            p.rect_filled(rail, R_CONTROL, POP);
-        let mut x = rail.left() + 2.0;
-        let plain = row.plain();
-        for (icon, tip) in acts {
-            let bw = if icon == "ban" { ban_w } else { 28.0 };
-            let b = Rect::from_min_size(pos2(x, rail.top() + 2.0), vec2(bw, 28.0));
-            x += bw + 2.0;
-            let resp = ui.interact(b, Id::unique(("rail", icon)), Sense::click()).on_hover_text(tip);
-            let danger = matches!(icon, "trash" | "ban");
-            let confirm = icon == "ban" && armed;
-            let bg = if confirm { DANGER_SOLID } else if resp.hovered() { BTN } else { Color32::TRANSPARENT };
-            p.rect_filled(b, CornerRadius::same(6), bg);
-            let tint = if confirm { Color32::WHITE } else if resp.hovered() { if danger { DANGER } else { TEXT } } else { MUTED };
-            let icon_rect = if confirm { Rect::from_min_size(pos2(b.left() + 7.0, b.center().y - 7.0), vec2(14.0, 14.0)) } else { Rect::from_center_size(b.center(), vec2(14.0, 14.0)) };
-            p.image(self.icons.get(icon).id(), icon_rect, uv(), tint);
-            if confirm {
-                p.text(pos2(b.left() + 26.0, b.center().y), Align2::LEFT_CENTER, "Ban?", semibold(12.0), Color32::WHITE);
-            }
-            if resp.hovered() {
-                ui.ctx().set_cursor_icon(CursorIcon::PointingHand);
-            }
-            if !resp.clicked() {
-                continue;
-            }
-            match icon {
-                "reply" => {
-                    let name = match &row.ev {
-                        ChatEvent::Msg { name, .. } | ChatEvent::Event { name, .. } => name.clone(),
-                        _ => login.clone(),
-                    };
-                    self.reply = Some((id.clone().unwrap_or_default(), name));
-                    self.focus_composer = true;
-                }
-                "pin" => {
-                    if let ChatEvent::Msg { name, color, parts, .. } = &row.ev {
-                        self.live.pin = Some(Pin { name: name.clone(), color: theme::parse_hex(color), text: self::plain(parts) });
-                    }
-                }
-                "copy" => {
-                    ui.ctx().copy_text(plain.clone());
-                    self.backend.toast("Copied.", false);
-                }
-                "trash" => {
-                    let (b, id) = (self.backend.clone(), id.clone());
-                    let login = login.clone();
-                    self.act(async move { b.moderate("delete", login, id, None).await });
-                }
-                "clock" => {
-                    let (b, login) = (self.backend.clone(), login.clone());
-                    self.act(async move { b.moderate("timeout", login, None, Some(600)).await });
-                }
-                "ban" if !armed => self.ban_armed = Some((seq, now + 3.0)),
-                "ban" => {
-                    self.ban_armed = None;
-                    let (b, login) = (self.backend.clone(), login.clone());
-                    self.act(async move { b.moderate("ban", login, None, None).await });
-                }
-                _ => {}
-            }
-        }
-        if armed {
-            ui.ctx().request_repaint_after(std::time::Duration::from_secs_f64((self.ban_armed.map_or(now, |a| a.1) - now).max(0.0) + 0.01));
-        }
-    }
-
     fn composer(&mut self, ui: &mut egui::Ui, rect: Rect) {
         let ctx = ui.ctx().clone();
         let mut inner = rect.shrink2(vec2(12.0, 0.0));
@@ -1638,6 +1754,10 @@ impl App {
             ctx.memory_mut(|m| m.request_focus(id));
             set_cursor_end(&ctx, id, &self.composer);
         }
+        if crate::settings::get().show_length && !self.composer.is_empty() {
+            let n = self.composer.chars().count();
+            ui.painter().text(pos2(field_rect.right() - 10.0, field_rect.bottom() - 4.0), Align2::RIGHT_BOTTOM, format!("{n}/500"), mono(10.5), if n > 500 { DANGER } else { FAINT });
+        }
         let resp = ui.interact(send_rect, Id::unique("send"), Sense::click()).on_hover_text("Send");
         ui.painter().rect_filled(send_rect, R_ITEM, if resp.hovered() { SAGE_HOVER } else { SAGE });
         ui.painter().image(self.icons.get("send").id(), Rect::from_center_size(send_rect.center(), vec2(17.0, 17.0)), uv(), ON_SAGE);
@@ -1649,7 +1769,19 @@ impl App {
         }
         if submit {
             let text = self.composer.trim().to_string();
-            if !text.is_empty() {
+            let lower = text.to_lowercase();
+            if lower.starts_with("/block ") || lower.starts_with("/unblock ") {
+                let name = text.split_whitespace().nth(1).unwrap_or_default().trim_start_matches('@').to_lowercase();
+                let mut prefs = crate::settings::get().as_ref().clone();
+                if lower.starts_with("/block ") {
+                    prefs.block(&name);
+                } else {
+                    prefs.unblock(&name);
+                }
+                crate::settings::set(prefs);
+                self.composer.clear();
+                self.toast(&ctx, if lower.starts_with("/block ") { format!("Blocked {name}.") } else { format!("Unblocked {name}.") }, false);
+            } else if !text.is_empty() {
                 self.sent.push(text.clone());
                 if self.sent.len() > 50 {
                     self.sent.remove(0);
@@ -1679,12 +1811,15 @@ impl App {
             let at = word.starts_with('@');
             let q = word.trim_start_matches('@').to_lowercase();
             let mut options: Vec<String> = Vec::new();
-            if !at {
+            let prefs = crate::settings::get();
+            if !at && prefs.emote_complete {
                 options.extend(self.emote_codes.iter().filter(|c| c.to_lowercase().starts_with(&q)).take(40).cloned());
             }
-            options.extend(
+            if prefs.name_complete {
+                options.extend(
                 self.recent_names.iter().rev().filter(|n| n.to_lowercase().starts_with(&q)).take(20).map(|n| if at { format!("@{n}") } else { n.clone() }),
-            );
+                );
+            }
             if options.is_empty() {
                 return;
             }
@@ -1693,7 +1828,9 @@ impl App {
         let c = self.completion.as_mut().unwrap();
         let n = c.options.len();
         c.i = if c.i == usize::MAX { if back { n - 1 } else { 0 } } else if back { (c.i + n - 1) % n } else { (c.i + 1) % n };
-        let pick = format!("{} ", c.options[c.i]);
+        // A name at the very start of a message gets a comma, like "name, ".
+        let comma = crate::settings::get().mention_comma && c.start == 0 && !c.options[c.i].starts_with('@') && !self.emote_codes.contains(&c.options[c.i]);
+        let pick = if comma { format!("{}, ", c.options[c.i]) } else { format!("{} ", c.options[c.i]) };
         self.composer = format!("{}{}{}", &self.composer[..c.start], pick, c.after);
         let pos = self.composer[..c.start].chars().count() + pick.chars().count();
         let mut state = egui::TextEdit::load_state(ctx, id).unwrap_or_default();
@@ -1905,6 +2042,121 @@ impl App {
         }
     }
 
+    /// The right-click menu on a message: copy, reply, and for moderators the Moderate section.
+    fn message_menu(&mut self, ctx: &egui::Context) {
+        let Some(menu) = &self.ctx_menu else { return };
+        let (seq, at, open) = (menu.seq, menu.at, menu.open);
+        let Some(row) = self.rows.iter().find(|r| r.seq == seq) else {
+            self.ctx_menu = None;
+            return;
+        };
+        let login = row.login().unwrap_or_default().to_string();
+        let id = row.id().map(str::to_string);
+        let full = row.plain();
+        let (name, text, color, is_msg) = match &row.ev {
+            ChatEvent::Msg { name, parts, color, .. } => (name.clone(), plain(parts), theme::parse_hex(color), true),
+            ChatEvent::Event { name, parts, color, .. } => (name.clone(), plain(parts), theme::parse_hex(color), false),
+            _ => (String::new(), full.clone(), TEXT, false),
+        };
+        // This is the streamer's own chat, so they can always moderate it.
+        let can_moderate = self.me.is_some() && is_msg;
+        let pinned = self.live.pin.is_some();
+        let screen = ctx.content_rect();
+        let w = 220.0;
+        let x = at.x.clamp(8.0, (screen.right() - w - 8.0).max(8.0));
+        let mut next_open = open;
+        let mut close = false;
+        let mut pin_for: Option<Option<u64>> = None;
+        let mut unpin = false;
+        let mut delete = false;
+        let mut reply = false;
+        let mut copy: Option<String> = None;
+        let area = egui::Area::new(Id::unique("msg-menu")).order(Order::Foreground).fixed_pos(pos2(x, at.y.max(TITLEBAR + 4.0))).show(ctx, |ui| {
+            popup_frame(12, 6).show(ui, |ui| {
+                ui.set_width(w);
+                ui.spacing_mut().item_spacing.y = 2.0;
+                if menu_item(ui, &self.icons, "copy", "Copy message").clicked() {
+                    copy = Some(text.clone());
+                }
+                if menu_item(ui, &self.icons, "copy", "Copy full message").clicked() {
+                    copy = Some(full.clone());
+                }
+                if id.is_some() && menu_item(ui, &self.icons, "reply", "Reply to message").clicked() {
+                    reply = true;
+                }
+                if can_moderate {
+                    let (rect, resp) = ui.allocate_exact_size(vec2(ui.available_width(), 36.0), Sense::click());
+                    if resp.hovered() || open == MenuOpen::Moderate || open == MenuOpen::Pin {
+                        ui.painter().rect_filled(rect, R_CONTROL, BTN);
+                    }
+                    ui.painter().image(self.icons.get("star").id(), Rect::from_min_size(pos2(rect.left() + 10.0, rect.center().y - 7.5), vec2(15.0, 15.0)), uv(), MUTED);
+                    ui.painter().text(pos2(rect.left() + 35.0, rect.center().y), Align2::LEFT_CENTER, "Moderate", regular(13.5), TEXT);
+                    ui.painter().image(self.icons.get("down").id(), Rect::from_center_size(pos2(rect.right() - 16.0, rect.center().y), vec2(12.0, 12.0)), uv(), FAINT);
+                    if resp.hovered() {
+                        ui.ctx().set_cursor_icon(CursorIcon::PointingHand);
+                    }
+                    if resp.clicked() {
+                        next_open = if open == MenuOpen::None { MenuOpen::Moderate } else { MenuOpen::None };
+                    }
+                    if open != MenuOpen::None {
+                        ui.indent("mod", |ui| {
+                            ui.spacing_mut().item_spacing.y = 2.0;
+                            if id.is_some() && card_item(ui, &self.icons, "trash", "Delete message", true).clicked() {
+                                delete = true;
+                            }
+                            if card_item(ui, &self.icons, "pin", "Pin message", false).clicked() {
+                                next_open = if open == MenuOpen::Pin { MenuOpen::Moderate } else { MenuOpen::Pin };
+                            }
+                            if open == MenuOpen::Pin {
+                                ui.horizontal_wrapped(|ui| {
+                                    ui.add_space(8.0);
+                                    for (label, secs) in [("5 min", Some(300)), ("15 min", Some(900)), ("1 hour", Some(3600)), ("Until unpinned", None)] {
+                                        if small_button(ui, label, false).clicked() {
+                                            pin_for = Some(secs);
+                                        }
+                                    }
+                                });
+                            }
+                            if pinned && card_item(ui, &self.icons, "x", "Unpin message", false).clicked() {
+                                unpin = true;
+                            }
+                        });
+                    }
+                }
+            });
+        });
+        if let Some(t) = copy {
+            ctx.copy_text(t);
+            self.backend.toast("Copied.", false);
+            close = true;
+        }
+        if reply {
+            self.reply = Some((id.clone().unwrap_or_default(), if name.is_empty() { login.clone() } else { name.clone() }));
+            self.focus_composer = true;
+            close = true;
+        }
+        if delete {
+            let (b, l, i) = (self.backend.clone(), login.clone(), id.clone());
+            self.act(async move { b.moderate("delete", l, i, None).await });
+            close = true;
+        }
+        if let Some(secs) = pin_for {
+            self.live.pin = Some(Pin { name: name.clone(), color, text: text.clone(), until: secs.map(|s| wall_ms() + s * 1000) });
+            close = true;
+        }
+        if unpin {
+            self.live.pin = None;
+            close = true;
+        }
+        if let Some(m) = &mut self.ctx_menu {
+            m.open = next_open;
+        }
+        let pressed_outside = ctx.input(|i| i.pointer.any_pressed() && i.pointer.interact_pos().is_some_and(|p| !area.response.rect.contains(p)));
+        if close || pressed_outside || ctx.input(|i| i.key_pressed(Key::Escape)) {
+            self.ctx_menu = None;
+        }
+    }
+
     fn toasts(&mut self, ctx: &egui::Context, bottom: f32) {
         let now = ctx.input(|i| i.time);
         self.toasts.retain(|t| t.until > now);
@@ -2085,12 +2337,14 @@ impl eframe::App for App {
             Screen::Chat => self.chat(ui, panel),
         }
         self.account_menu(&ctx, pos2(full.right() - 208.0, TITLEBAR - 4.0));
+        self.prefs_window(&ctx);
         let toast_bottom = if matches!(self.screen, Screen::Chat) { full.bottom() - COMPOSER_H - 12.0 } else { full.bottom() - 20.0 };
         self.toasts(&ctx, toast_bottom);
         self.edges(&ctx);
     }
 
     fn save(&mut self, storage: &mut dyn eframe::Storage) {
+        storage.set_string(SETTINGS_KEY, crate::settings::to_json());
         storage.set_string(PINNED_KEY, if self.pinned { "1".into() } else { String::new() });
         storage.set_string(CLIENT_KEY, self.saved_client_id.clone());
     }

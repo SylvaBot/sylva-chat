@@ -14,7 +14,7 @@ use tokio_util::sync::CancellationToken;
 type CmdResult<T> = Result<T, String>;
 
 /// Reading chat, sending as yourself, deleting messages, timeouts and bans.
-const SCOPES: &str = "chat:read user:write:chat moderator:manage:banned_users moderator:manage:chat_messages channel:read:hype_train channel:read:polls channel:read:predictions channel:manage:vips channel:manage:moderators moderator:manage:shoutouts channel:read:redemptions";
+const SCOPES: &str = "chat:read user:write:chat moderator:manage:banned_users moderator:manage:chat_messages channel:read:hype_train channel:read:polls channel:read:predictions channel:manage:vips channel:manage:moderators moderator:manage:shoutouts channel:read:redemptions moderator:read:followers moderator:read:suspicious_users";
 
 pub struct Backend {
     notify: Notify,

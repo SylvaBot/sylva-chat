@@ -17,21 +17,26 @@ use tokio_util::sync::CancellationToken;
 
 const WS_URL: &str = "wss://eventsub.wss.twitch.tv/ws?keepalive_timeout_seconds=30";
 
-const SUBSCRIPTIONS: &[(&str, &str)] = &[
-    ("channel.hype_train.begin", "2"),
-    ("channel.hype_train.progress", "2"),
-    ("channel.hype_train.end", "2"),
-    ("channel.poll.begin", "1"),
-    ("channel.poll.progress", "1"),
-    ("channel.poll.end", "1"),
-    ("channel.prediction.begin", "1"),
-    ("channel.prediction.progress", "1"),
-    ("channel.prediction.lock", "1"),
-    ("channel.prediction.end", "1"),
-    ("channel.channel_points_custom_reward_redemption.add", "1"),
-    ("channel.shared_chat.begin", "1"),
-    ("channel.shared_chat.update", "1"),
-    ("channel.shared_chat.end", "1"),
+/// Type, version, and whether Twitch wants the moderator in the condition too.
+const SUBSCRIPTIONS: &[(&str, &str, bool)] = &[
+    ("channel.hype_train.begin", "2", false),
+    ("channel.hype_train.progress", "2", false),
+    ("channel.hype_train.end", "2", false),
+    ("channel.poll.begin", "1", false),
+    ("channel.poll.progress", "1", false),
+    ("channel.poll.end", "1", false),
+    ("channel.prediction.begin", "1", false),
+    ("channel.prediction.progress", "1", false),
+    ("channel.prediction.lock", "1", false),
+    ("channel.prediction.end", "1", false),
+    ("channel.channel_points_custom_reward_redemption.add", "1", false),
+    ("channel.shared_chat.begin", "1", false),
+    ("channel.shared_chat.update", "1", false),
+    ("channel.shared_chat.end", "1", false),
+    ("channel.suspicious_user.message", "1", true),
+    ("channel.suspicious_user.update", "1", true),
+    ("stream.online", "1", false),
+    ("stream.offline", "1", false),
 ];
 
 type Tx = mpsc::UnboundedSender<ChatEvent>;
@@ -125,6 +130,22 @@ async fn session(
                     let _ = tx.send(redemption(&payload["event"], shared));
                     continue;
                 }
+                match kind {
+                    "channel.suspicious_user.message" | "channel.suspicious_user.update" => {
+                        let e = &payload["event"];
+                        let status = e["low_trust_status"].as_str().unwrap_or_default().to_string();
+                        let login = e["user_login"].as_str().unwrap_or_default().to_string();
+                        if !login.is_empty() {
+                            let _ = tx.send(ChatEvent::Suspicious { login, status });
+                        }
+                        continue;
+                    }
+                    "stream.online" => {
+                        let _ = tx.send(ChatEvent::StreamStart);
+                        continue;
+                    }
+                    _ => {}
+                }
                 if let Some(l) = live::from_notification(kind, &payload["event"], &shared.channel_id) {
                     publish(notify, shared, l);
                 }
@@ -158,11 +179,15 @@ fn redemption(e: &Value, shared: &Shared) -> ChatEvent {
 /// Subscribes this session to everything Sylva Chat shows. False when the connection is no use.
 async fn subscribe(client: &TwitchClient, shared: &Shared, session_id: &str, tx: &Tx, told_scopes: &mut bool) -> bool {
     let mut missing = false;
-    for (kind, version) in SUBSCRIPTIONS {
+    for (kind, version, moderator) in SUBSCRIPTIONS {
+        let mut condition = json!({ "broadcaster_user_id": shared.channel_id });
+        if *moderator {
+            condition["moderator_user_id"] = json!(shared.me_id);
+        }
         let body = json!({
             "type": kind,
             "version": version,
-            "condition": { "broadcaster_user_id": shared.channel_id },
+            "condition": condition,
             "transport": { "method": "websocket", "session_id": session_id },
         });
         match client.helix(Method::POST, "/eventsub/subscriptions", &[], Some(&body)).await {
@@ -180,7 +205,7 @@ async fn subscribe(client: &TwitchClient, shared: &Shared, session_id: &str, tx:
     if missing && !*told_scopes {
         *told_scopes = true;
         let _ = tx.send(ChatEvent::Sys {
-            text: "To see hype trains, polls, predictions and channel point redemptions here, sign out and sign in again so Twitch can allow them.".into(),
+            text: "To see hype trains, polls, predictions, redemptions and suspicious users here, sign out and sign in again so Twitch can allow them.".into(),
         });
     }
     true
