@@ -10,7 +10,7 @@ use crate::images::{Icons, Images};
 use crate::lines::{ChatEvent, Part};
 use crate::theme::{self, *};
 use crate::twitch::DeviceCode;
-use crate::ui_events::{Ui as Event, User};
+use crate::ui_events::{Profile, Ui as Event, User};
 use eframe::egui::{
     self, pos2, vec2, Align2, Color32, CornerRadius, CursorIcon, Galley, Id, Key, Modifiers, Order, Pos2, Rect, Response,
     Sense, Stroke, TextureId, UiBuilder, ViewportCommand,
@@ -488,6 +488,27 @@ enum Screen {
     Chat,
 }
 
+/// What drawing a list of rows found.
+struct RowsOut {
+    clicked: Option<(Hit, Pos2)>,
+    opened: Option<(u64, Pos2)>,
+    hover_tip: Option<(Arc<Tip>, Rect, String)>,
+    next_frame: Option<u64>,
+    at_bottom: bool,
+}
+
+/// Lays out the rows that are new or changed.
+fn lay_out(images: &Images, rows: &mut VecDeque<Row>, width: f32, painter: &egui::Painter) {
+    for r in rows {
+        if let Some(l) = &r.layout {
+            if l.width == width && (l.provisional.is_empty() || !l.provisional.iter().any(|u| images.get(u).is_some())) {
+                continue;
+            }
+        }
+        r.layout = Some(layout_row(r, width, painter, images));
+    }
+}
+
 struct Toast {
     text: String,
     bad: bool,
@@ -498,6 +519,12 @@ struct Card {
     login: String,
     at: Pos2,
     ban_armed_until: f64,
+    /// This person's messages, newest last, drawn like the main chat.
+    rows: VecDeque<Row>,
+    profile: Option<Profile>,
+    notes_open: bool,
+    jump: bool,
+    width: f32,
 }
 
 /// The right-click menu on a message.
@@ -538,6 +565,7 @@ pub struct App {
     jump: bool,
     loading: bool,
     ctx_menu: Option<CtxMenu>,
+    menu_rect: Option<Rect>,
     card: Option<Card>,
     /// Everyone's messages this session, newest last, for the user card to scroll back through.
     history: HashMap<String, VecDeque<ChatEvent>>,
@@ -703,6 +731,7 @@ impl App {
             jump: false,
             loading: true,
             ctx_menu: None,
+            menu_rect: None,
             card: None,
             history: HashMap::new(),
             chatted: HashSet::new(),
@@ -806,6 +835,13 @@ impl App {
                 Event::Toast { text, bad } => self.toast(ctx, text, bad),
                 Event::UpdateReady(v) => self.update = Some(v),
                 Event::Live(l) => self.live_event(l),
+                Event::Profile(p) => {
+                    if let Some(c) = &mut self.card {
+                        if c.login == p.login {
+                            c.profile = Some(p);
+                        }
+                    }
+                }
             }
         }
         if let Some(rx) = &self.pending_codes {
@@ -879,10 +915,19 @@ impl App {
                 let _ = id;
                 // Keep each person's messages for their card.
                 let limit = prefs.usercard_limit.max(1) as usize;
-                let h = self.history.entry(login.clone()).or_default();
+                let who = login.clone();
+                let h = self.history.entry(who.clone()).or_default();
                 h.push_back(ev.clone());
                 while h.len() > limit {
                     h.pop_front();
+                }
+                if let Some(c) = self.card.as_mut().filter(|c| c.login == who) {
+                    self.seq += 1;
+                    c.rows.push_back(Row { seq: self.seq, ev: ev.clone(), gone: false, layout: None, mark: Mark::None, faded: false });
+                    if c.rows.len() > limit {
+                        c.rows.pop_front();
+                    }
+                    c.jump = true;
                 }
             }
             _ => {}
@@ -947,6 +992,18 @@ impl App {
     }
 
     // ---------- Title bar ----------
+
+    /// A small square button with an icon and a tooltip.
+    fn icon_button(&self, ui: &mut egui::Ui, icon: &str, tip: &str, on: bool) -> Response {
+        let (rect, resp) = ui.allocate_exact_size(vec2(30.0, 30.0), Sense::click());
+        let resp = resp.on_hover_text(tip);
+        ui.painter().rect_filled(rect, R_CONTROL, if on { SAGE } else if resp.hovered() { BTN_IN_HOVER } else { BTN_IN });
+        ui.painter().image(self.icons.get(icon).id(), Rect::from_center_size(rect.center(), vec2(14.0, 14.0)), uv(), if on { ON_SAGE } else { TEXT });
+        if resp.hovered() {
+            ui.ctx().set_cursor_icon(CursorIcon::PointingHand);
+        }
+        resp
+    }
 
     fn win_button(&self, ui: &mut egui::Ui, rect: Rect, icon: &str, danger: bool, pressed: bool, tip: &str) -> Response {
         let r = ui.interact(rect, ui.scope_id().with(("wb", icon)), Sense::click()).on_hover_text(tip);
@@ -1209,28 +1266,83 @@ impl App {
                 r.layout = None;
             }
         }
-        let painter = ui.painter_at(list_rect);
-        for r in &mut self.rows {
-            if let Some(l) = &r.layout {
-                if l.width == width && (l.provisional.is_empty() || !l.provisional.iter().any(|u| self.images.get(u).is_some())) {
-                    continue;
-                }
-            }
-            r.layout = Some(layout_row(r, width, &painter, &self.images));
+        lay_out(&self.images, &mut self.rows, width, &ui.painter_at(list_rect));
+        let jump = std::mem::take(&mut self.jump);
+        let out = self.paint_rows(ui, &self.rows, list_rect, "chat", jump, now);
+        let (clicked, opened) = (out.clicked, out.opened);
+        self.at_bottom = out.at_bottom;
+        let now_ms = (now * 1000.0) as u64;
+        if let Some((tip, r, small)) = out.hover_tip {
+            self.emote_card(&ctx, &tip, r, &small, now_ms);
         }
-        let total: f32 = self.rows.iter().map(|r| r.layout.as_ref().map_or(0.0, |l| l.height)).sum::<f32>() + 16.0;
+        if let Some(ms) = out.next_frame {
+            ctx.request_repaint_after(std::time::Duration::from_millis(ms.max(16)));
+        }
 
+        if let Some((seq, at)) = opened {
+            self.ctx_menu = Some(CtxMenu { seq, at, open: MenuOpen::None });
+        }
+
+        if let Some((hit, at)) = clicked {
+            match hit {
+                Hit::Link(url) => {
+                    let _ = open::that_detached(url);
+                }
+                Hit::Name(login) => self.open_card(login, at),
+            }
+        }
+
+        // "New messages" pill.
+        if !self.held.is_empty() || !self.at_bottom {
+            let n = self.held.len();
+            let text = if n > 0 { format!("{} new message{}", if n > 99 { "99+".into() } else { n.to_string() }, if n == 1 { "" } else { "s" }) } else { "Back to live chat".into() };
+            let g = ui.painter().layout_no_wrap(text, medium(12.5), TEXT);
+            let w = g.size().x + 24.0 + 20.0;
+            let pill = Rect::from_center_size(pos2(list_rect.center().x, list_rect.bottom() - 28.0), vec2(w, 32.0));
+            let resp = ui.interact(pill, Id::unique("jump"), Sense::click());
+            let p = ui.painter().clone().with_layer_id(egui::LayerId::new(Order::Foreground, Id::unique("jump-layer")));
+            p.add(shadow().as_shape(pill, CornerRadius::same(16)));
+            p.rect_filled(pill, CornerRadius::same(16), if resp.hovered() { SURFACE_3 } else { POP });
+            p.image(self.icons.get("down").id(), Rect::from_min_size(pos2(pill.left() + 12.0, pill.center().y - 6.5), vec2(13.0, 13.0)), uv(), TEXT);
+            p.galley(pos2(pill.left() + 32.0, pill.center().y - g.size().y / 2.0), g, TEXT);
+            if resp.clicked() {
+                self.pause_until = 0.0;
+                self.at_bottom = true;
+                self.jump = true;
+                self.card = None;
+                self.release_held(now);
+                ctx.request_repaint();
+            }
+        }
+
+        if self.loading && self.rows.is_empty() && self.held.is_empty() {
+            let a = 0.55 + 0.45 * ((now * std::f64::consts::PI / 2.2).sin() * 0.5 + 0.5) as f32;
+            ui.painter().text(list_rect.center(), Align2::CENTER_CENTER, "Loading chat", regular(13.0), FAINT.gamma_multiply(a));
+            ctx.request_repaint_after(std::time::Duration::from_millis(50));
+        }
+
+        self.composer(ui, composer_rect);
+        self.chatter_card(&ctx, now);
+        self.message_menu(&ctx);
+    }
+
+    /// Draws a list of rows in a scroll area, and reports what was clicked or hovered. Used by the
+    /// main chat and by the list of one person's messages on their card.
+    fn paint_rows(&self, ui: &mut egui::Ui, rows: &VecDeque<Row>, list_rect: Rect, salt: &str, jump: bool, now: f64) -> RowsOut {
+        let ctx = ui.ctx().clone();
+        let pointer = ctx.input(|i| i.pointer.hover_pos());
+        let width = list_rect.width();
+        let total: f32 = rows.iter().map(|r| r.layout.as_ref().map_or(0.0, |l| l.height)).sum::<f32>() + 16.0;
         let mut clicked: Option<(Hit, Pos2)> = None;
         let mut opened: Option<(u64, Pos2)> = None;
         let mut next_frame: Option<u64> = None;
         let mut hover_tip: Option<(Arc<Tip>, Rect, String)> = None;
         let now_ms = (now * 1000.0) as u64;
-        let jump = std::mem::take(&mut self.jump);
-        let mut area = egui::ScrollArea::vertical().id_salt("chat").stick_to_bottom(true).auto_shrink([false, false]);
+        let mut area = egui::ScrollArea::vertical().id_salt(salt).stick_to_bottom(true).auto_shrink([false, false]);
         if jump {
             area = area.vertical_scroll_offset(total);
         }
-        let mut at_bottom = self.at_bottom;
+        let mut at_bottom = true;
         let prefs = crate::settings::get();
         ui.scope_builder(UiBuilder::new().max_rect(list_rect), |ui| {
             let out = area.show_viewport(ui, |ui, viewport| {
@@ -1238,7 +1350,7 @@ impl App {
                 at_bottom = viewport.max.y >= total - 4.0 || total <= viewport.height();
                 let origin = ui.min_rect().min;
                 let mut y = 8.0;
-                for row in &self.rows {
+                for row in rows {
                     let Some(l) = &row.layout else { continue };
                     let top = y;
                     y += l.height;
@@ -1313,59 +1425,7 @@ impl App {
             });
             let _ = out;
         });
-        self.at_bottom = at_bottom;
-        if let Some((tip, r, small)) = hover_tip {
-            self.emote_card(&ctx, &tip, r, &small, now_ms);
-        }
-        if let Some(ms) = next_frame {
-            ctx.request_repaint_after(std::time::Duration::from_millis(ms.max(16)));
-        }
-
-        if let Some((seq, at)) = opened {
-            self.ctx_menu = Some(CtxMenu { seq, at, open: MenuOpen::None });
-        }
-
-        if let Some((hit, at)) = clicked {
-            match hit {
-                Hit::Link(url) => {
-                    let _ = open::that_detached(url);
-                }
-                Hit::Name(login) => self.card = Some(Card { login, at, ban_armed_until: 0.0 }),
-            }
-        }
-
-        // "New messages" pill.
-        if !self.held.is_empty() || !self.at_bottom {
-            let n = self.held.len();
-            let text = if n > 0 { format!("{} new message{}", if n > 99 { "99+".into() } else { n.to_string() }, if n == 1 { "" } else { "s" }) } else { "Back to live chat".into() };
-            let g = ui.painter().layout_no_wrap(text, medium(12.5), TEXT);
-            let w = g.size().x + 24.0 + 20.0;
-            let pill = Rect::from_center_size(pos2(list_rect.center().x, list_rect.bottom() - 28.0), vec2(w, 32.0));
-            let resp = ui.interact(pill, Id::unique("jump"), Sense::click());
-            let p = ui.painter().clone().with_layer_id(egui::LayerId::new(Order::Foreground, Id::unique("jump-layer")));
-            p.add(shadow().as_shape(pill, CornerRadius::same(16)));
-            p.rect_filled(pill, CornerRadius::same(16), if resp.hovered() { SURFACE_3 } else { POP });
-            p.image(self.icons.get("down").id(), Rect::from_min_size(pos2(pill.left() + 12.0, pill.center().y - 6.5), vec2(13.0, 13.0)), uv(), TEXT);
-            p.galley(pos2(pill.left() + 32.0, pill.center().y - g.size().y / 2.0), g, TEXT);
-            if resp.clicked() {
-                self.pause_until = 0.0;
-                self.at_bottom = true;
-                self.jump = true;
-                self.card = None;
-                self.release_held(now);
-                ctx.request_repaint();
-            }
-        }
-
-        if self.loading && self.rows.is_empty() && self.held.is_empty() {
-            let a = 0.55 + 0.45 * ((now * std::f64::consts::PI / 2.2).sin() * 0.5 + 0.5) as f32;
-            ui.painter().text(list_rect.center(), Align2::CENTER_CENTER, "Loading chat", regular(13.0), FAINT.gamma_multiply(a));
-            ctx.request_repaint_after(std::time::Duration::from_millis(50));
-        }
-
-        self.composer(ui, composer_rect);
-        self.chatter_card(&ctx, now);
-        self.message_menu(&ctx);
+        RowsOut { clicked, opened, hover_tip, next_frame, at_bottom }
     }
 
     // ---------- Live: hype train, poll, prediction, Shared Chat, pinned ----------
@@ -1881,147 +1941,243 @@ impl App {
         painter.galley(pos2(rect.center().x - by.size().x / 2.0, ny + name.size().y + 2.0), by, FAINT);
     }
 
+    /// Opens a person's card: their messages so far, and a request for their profile.
+    fn open_card(&mut self, login: String, at: Pos2) {
+        let mut rows = VecDeque::new();
+        if let Some(h) = self.history.get(&login) {
+            for ev in h {
+                self.seq += 1;
+                rows.push_back(Row { seq: self.seq, ev: ev.clone(), gone: false, layout: None, mark: Mark::None, faded: false });
+            }
+        }
+        // Messages that were deleted or cleared stay struck through.
+        for r in self.rows.iter().chain(self.held.iter()).filter(|r| r.gone) {
+            if let Some(id) = r.id() {
+                if let Some(c) = rows.iter_mut().find(|c| c.id() == Some(id)) {
+                    c.gone = true;
+                }
+            }
+        }
+        let b = self.backend.clone();
+        let l = login.clone();
+        self.spawn(async move { b.load_profile(l).await });
+        self.card = Some(Card { login, at, ban_armed_until: 0.0, rows, profile: None, notes_open: false, jump: true, width: 0.0 });
+    }
+
     fn chatter_card(&mut self, ctx: &egui::Context, now: f64) {
-        let Some(card) = &self.card else { return };
+        let Some(mut card) = self.card.take() else { return };
         let login = card.login.clone();
         let me = self.me.clone();
         let screen = ctx.content_rect();
-        let w = 300.0_f32.min(screen.width() - 24.0);
-        let x = card.at.x.clamp(12.0, screen.right() - w - 12.0);
-        let y = (card.at.y + 6.0).max(TITLEBAR + 8.0);
-        let (name, color) = self
-            .rows
-            .iter()
-            .rev()
-            .find_map(|r| match &r.ev {
-                ChatEvent::Msg { login: l, name, color, .. } if *l == login => Some((name.clone(), theme::parse_hex(color))),
-                _ => None,
-            })
-            .unwrap_or((login.clone(), TEXT));
-        let recent: Vec<(String, bool)> = self
-            .rows
-            .iter()
-            .filter(|r| r.login() == Some(login.as_str()))
-            .filter_map(|r| match &r.ev {
-                ChatEvent::Msg { parts, ts, .. } => Some((format!("{}  {}", clock(*ts), plain(parts)), r.gone)),
-                _ => None,
-            })
-            .rev()
-            .take(12)
-            .collect::<Vec<_>>()
-            .into_iter()
-            .rev()
-            .collect();
+        let w = 460.0_f32.min(screen.width() - 24.0);
+        let h = (screen.height() - TITLEBAR - 24.0).clamp(320.0, 640.0);
+        let x = card.at.x.clamp(12.0, (screen.right() - w - 12.0).max(12.0));
+        let y = (card.at.y + 6.0).clamp(TITLEBAR + 8.0, (screen.bottom() - h - 12.0).max(TITLEBAR + 8.0));
+        let latest = self.rows.iter().chain(self.held.iter()).rev().find_map(|r| match &r.ev {
+            ChatEvent::Msg { login: l, name, color, badges, .. } if *l == login => Some((name.clone(), theme::parse_hex(color), badges.iter().map(|b| b.title.to_lowercase()).collect::<Vec<_>>())),
+            _ => None,
+        });
+        let (name, color, titles) = latest.unwrap_or_else(|| (card.profile.as_ref().map_or(login.clone(), |p| p.name.clone()), TEXT, Vec::new()));
         let is_self = me.as_ref().is_some_and(|m| m.login == login);
-        // VIP and moderator come from the badges on their latest message.
-        let titles: Vec<String> = self
-            .rows
-            .iter()
-            .rev()
-            .find_map(|r| match &r.ev {
-                ChatEvent::Msg { login: l, badges, .. } if *l == login => Some(badges.iter().map(|b| b.title.to_lowercase()).collect()),
-                _ => None,
-            })
-            .unwrap_or_default();
         let is_vip = titles.iter().any(|t| t == "vip");
         let is_mod = titles.iter().any(|t| t == "moderator");
+        let prefs = crate::settings::get();
+        let blocked = prefs.is_blocked(&login);
+        let no_hl = prefs.no_highlight.contains(&login);
+        let note = prefs.notes.get(&login).cloned().unwrap_or_default();
+        let mut new_note = note.clone();
+        let mut toggle_block = false;
+        let mut toggle_hl = false;
         let mut mention = false;
         let armed = card.ban_armed_until > now;
         let mut close = false;
         let mut action: Option<(&'static str, Option<u64>)> = None;
         let mut arm = false;
+        let mut notes_open = card.notes_open;
+        let width = w - 28.0;
+        if (width - card.width).abs() > 0.5 {
+            card.width = width;
+            for r in &mut card.rows {
+                r.layout = None;
+            }
+        }
+        lay_out(&self.images, &mut card.rows, width, &ctx.layer_painter(egui::LayerId::new(Order::Tooltip, Id::unique("card-measure"))));
+        let jump = std::mem::take(&mut card.jump);
+        let mut out: Option<RowsOut> = None;
         let area = egui::Area::new(Id::unique("card")).order(Order::Foreground).fixed_pos(pos2(x, y)).show(ctx, |ui| {
             popup_frame(R_PANEL, 14).show(ui, |ui| {
-                ui.set_width(w - 28.0);
-                ui.spacing_mut().item_spacing = vec2(6.0, 10.0);
+                ui.set_width(width);
+                ui.set_height(h - 28.0);
+                ui.spacing_mut().item_spacing = vec2(6.0, 8.0);
+                // Who they are.
                 ui.horizontal(|ui| {
-                    ui.label(egui::RichText::new(&name).font(bold(17.0)).color(color));
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    let (ar, _) = ui.allocate_exact_size(vec2(64.0, 64.0), Sense::hover());
+                    ui.painter().rect_filled(ar, R_ITEM, SURFACE_2);
+                    if let Some(p) = card.profile.as_ref().filter(|p| !p.avatar.is_empty()) {
+                        if let Some(a) = self.images.get(&p.avatar) {
+                            ui.put(ar, egui::Image::new((a.frame(0).0.id(), ar.size())).corner_radius(R_ITEM));
+                        }
+                    } else {
+                        ui.painter().image(self.icons.get("user").id(), Rect::from_center_size(ar.center(), vec2(24.0, 24.0)), uv(), FAINT);
+                    }
+                    ui.vertical(|ui| {
+                        ui.spacing_mut().item_spacing.y = 2.0;
+                        ui.label(egui::RichText::new(&name).font(bold(17.0)).color(color));
+                        let p = card.profile.as_ref();
+                        let stat = |ui: &mut egui::Ui, label: &str, value: Option<String>| {
+                            let t = match value {
+                                Some(v) => format!("{label}: {v}"),
+                                None => format!("{label}: ..."),
+                            };
+                            ui.label(egui::RichText::new(t).font(regular(12.5)).color(TEXT_2));
+                        };
+                        stat(ui, "Followers", p.and_then(|p| p.followers).map(crate::lines::thousands));
+                        stat(ui, "Created", p.map(|p| p.created.clone()).filter(|c| !c.is_empty()));
+                        let since = p.map(|p| p.following_since.clone().unwrap_or_else(|| "not following".into()));
+                        stat(ui, "Following since", since);
+                    });
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::TOP), |ui| {
                         let (r, _) = ui.allocate_exact_size(vec2(32.0, 32.0), Sense::hover());
                         if self.win_button(ui, r, "x", false, false, "Close").clicked() {
                             close = true;
                         }
+                        ui.vertical(|ui| {
+                            ui.spacing_mut().item_spacing.y = 4.0;
+                            if let Some(p) = &card.profile {
+                                if small_button(ui, &format!("ID {}", p.id), false).on_hover_text("Copy the ID").clicked() {
+                                    ui.ctx().copy_text(p.id.clone());
+                                }
+                            }
+                            if small_button(ui, "Copy name", false).clicked() {
+                                ui.ctx().copy_text(login.clone());
+                            }
+                        });
                     });
                 });
-                ui.label(egui::RichText::new(&login).font(mono(12.0)).color(FAINT));
+                // What to do with them in this app.
+                ui.horizontal_wrapped(|ui| {
+                    if check(ui, "Block", blocked).clicked() {
+                        toggle_block = true;
+                    }
+                    if check(ui, "Ignore highlights", no_hl).clicked() {
+                        toggle_hl = true;
+                    }
+                    if small_button(ui, if note.is_empty() { "Add notes" } else { "Notes" }, false).clicked() {
+                        notes_open = !notes_open;
+                    }
+                    if small_button(ui, "Open on Twitch", false).clicked() {
+                        let _ = open::that_detached(format!("https://www.twitch.tv/{login}"));
+                    }
+                    if !is_self {
+                        let tip = |on: bool, a: &'static str, b: &'static str| if on { a } else { b };
+                        if self.icon_button(ui, "star", tip(is_mod, "Remove moderator", "Make moderator"), is_mod).clicked() {
+                            action = Some((if is_mod { "unmod" } else { "mod" }, None));
+                        }
+                        if self.icon_button(ui, "gem", tip(is_vip, "Remove VIP", "Make VIP"), is_vip).clicked() {
+                            action = Some((if is_vip { "unvip" } else { "vip" }, None));
+                        }
+                        if self.icon_button(ui, "sparkles", "Shoutout", false).clicked() {
+                            action = Some(("shoutout", None));
+                        }
+                        if self.icon_button(ui, "reply", "Mention in chat", false).clicked() {
+                            mention = true;
+                        }
+                    }
+                });
+                if notes_open {
+                    field(ui, &mut new_note, "Notes about this person, only on this computer", false, Id::unique(("note", &login)));
+                }
+                // Moderation.
                 if !is_self {
-                    ui.label(egui::RichText::new("Time out").font(regular(12.0)).color(MUTED));
+                    ui.horizontal(|ui| {
+                        ui.label(egui::RichText::new("Timeouts").font(regular(12.0)).color(MUTED));
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            if small_button(ui, if armed { "Sure? Ban" } else { "Ban" }, true).clicked() {
+                                if armed {
+                                    action = Some(("ban", None));
+                                } else {
+                                    arm = true;
+                                }
+                            }
+                            if small_button(ui, "Unban", false).on_hover_text("End a timeout or a ban").clicked() {
+                                action = Some(("unban", None));
+                            }
+                        });
+                    });
                     ui.horizontal_wrapped(|ui| {
-                        for (label, secs) in [("1m", 60), ("10m", 600), ("1h", 3600), ("1d", 86400), ("1w", 604800)] {
+                        ui.spacing_mut().item_spacing = vec2(4.0, 4.0);
+                        for (label, secs) in [("1s", 1), ("30s", 30), ("1m", 60), ("5m", 300), ("30m", 1800), ("1h", 3600), ("1d", 86400), ("1w", 604800)] {
                             if small_button(ui, label, false).clicked() {
                                 action = Some(("timeout", Some(secs)));
                             }
                         }
-                        if small_button(ui, "Remove", false).on_hover_text("End a timeout or a ban").clicked() {
-                            action = Some(("unban", None));
-                        }
                     });
-                    ui.spacing_mut().item_spacing.y = 2.0;
-                    let item = |ui: &mut egui::Ui, icon: &str, text: &str, danger: bool| card_item(ui, &self.icons, icon, text, danger).clicked();
-                    if item(ui, "gem", if is_vip { "Remove VIP" } else { "Make VIP" }, false) {
-                        action = Some((if is_vip { "unvip" } else { "vip" }, None));
-                    }
-                    if item(ui, "star", if is_mod { "Remove moderator" } else { "Make moderator" }, false) {
-                        action = Some((if is_mod { "unmod" } else { "mod" }, None));
-                    }
-                    if item(ui, "sparkles", "Shoutout", false) {
-                        action = Some(("shoutout", None));
-                    }
-                    if item(ui, "reply", "Mention in chat", false) {
-                        mention = true;
-                    }
-                    if item(ui, "copy", "Copy name", false) {
-                        ui.ctx().copy_text(login.clone());
-                        close = true;
-                    }
-                    if item(ui, "ban", if armed { "Ban, click again to confirm" } else { "Ban" }, true) {
-                        if armed {
-                            action = Some(("ban", None));
-                        } else {
-                            arm = true;
-                        }
-                    }
-                    ui.spacing_mut().item_spacing.y = 10.0;
                 }
-                ui.label(egui::RichText::new("Recent messages").font(regular(12.0)).color(MUTED));
-                egui::ScrollArea::vertical().max_height(200.0).show(ui, |ui| {
-                    ui.spacing_mut().item_spacing.y = 4.0;
-                    if recent.is_empty() {
-                        ui.label(egui::RichText::new("Nothing in chat yet.").font(regular(13.0)).color(FAINT));
-                    }
-                    for (text, gone) in &recent {
-                        let mut rt = egui::RichText::new(text).font(regular(13.0)).color(if *gone { FAINT } else { TEXT_2 });
-                        if *gone {
-                            rt = rt.strikethrough();
-                        }
-                        ui.add(egui::Label::new(rt).wrap());
-                    }
-                });
-                let open_card = ui.add(egui::Button::image_and_text(
-                    egui::Image::new((self.icons.get("external").id(), vec2(14.0, 14.0))).tint(MUTED),
-                    egui::RichText::new("Viewer card on Twitch").font(medium(12.5)).color(MUTED),
-                ).fill(Color32::TRANSPARENT));
-                if open_card.clicked() {
-                    if let Some(me) = &me {
-                        let _ = open::that_detached(format!("https://www.twitch.tv/popout/{}/viewercard/{}", me.login, login));
-                    }
+                // Their messages, with everything the main chat does.
+                ui.label(egui::RichText::new(format!("Messages ({})", card.rows.len())).font(regular(12.0)).color(MUTED));
+                let rect = ui.allocate_exact_size(vec2(width, (ui.available_height() - 4.0).max(60.0)), Sense::hover()).0;
+                ui.painter().rect_filled(rect, R_ITEM, SURFACE);
+                if card.rows.is_empty() {
+                    ui.painter().text(rect.center(), Align2::CENTER_CENTER, "Nothing in chat yet.", regular(13.0), FAINT);
+                } else {
+                    out = Some(self.paint_rows(ui, &card.rows, rect, "card-chat", jump, now));
                 }
             });
         });
-        if arm {
-            if let Some(c) = &mut self.card {
-                c.ban_armed_until = now + 3.0;
+        let now_ms = (now * 1000.0) as u64;
+        let mut open_for: Option<(String, Pos2)> = None;
+        if let Some(o) = out {
+            if let Some((seq, at)) = o.opened {
+                self.ctx_menu = Some(CtxMenu { seq, at, open: MenuOpen::None });
             }
+            if let Some((tip, r, small)) = o.hover_tip {
+                self.emote_card(ctx, &tip, r, &small, now_ms);
+            }
+            if let Some(ms) = o.next_frame {
+                ctx.request_repaint_after(std::time::Duration::from_millis(ms.max(16)));
+            }
+            if let Some((hit, at)) = o.clicked {
+                match hit {
+                    Hit::Link(url) => {
+                        let _ = open::that_detached(url);
+                    }
+                    Hit::Name(l) if l != login => open_for = Some((l, at)),
+                    Hit::Name(_) => {}
+                }
+            }
+        }
+        card.notes_open = notes_open;
+        if arm {
+            card.ban_armed_until = now + 3.0;
             ctx.request_repaint_after(std::time::Duration::from_millis(3010));
+        }
+        if toggle_block || toggle_hl || new_note != note {
+            let mut s = prefs.as_ref().clone();
+            if toggle_block {
+                if blocked {
+                    s.unblock(&login);
+                } else {
+                    s.block(&login);
+                }
+            }
+            if toggle_hl && !s.no_highlight.remove(&login) {
+                s.no_highlight.insert(login.clone());
+            }
+            if new_note != note {
+                if new_note.trim().is_empty() {
+                    s.notes.remove(&login);
+                } else {
+                    s.notes.insert(login.clone(), new_note);
+                }
+            }
+            crate::settings::set(s);
         }
         if let Some((what, secs)) = action {
             let b = self.backend.clone();
             let l = login.clone();
             self.act(async move { b.moderate(what, l, None, secs).await });
             if what == "ban" {
-                if let Some(c) = &mut self.card {
-                    c.ban_armed_until = 0.0;
-                }
+                card.ban_armed_until = 0.0;
             }
         }
         if mention {
@@ -2035,19 +2191,27 @@ impl App {
             self.focus_composer = true;
             close = true;
         }
-        let pressed_outside = ctx.input(|i| i.pointer.any_pressed() && i.pointer.interact_pos().is_some_and(|p| !area.response.rect.contains(p)));
-        if close || pressed_outside || ctx.input(|i| i.key_pressed(Key::Escape)) {
-            // A press on a name opens the card again for that name.
-            self.card = None;
+        let in_menu = self.menu_rect.is_some_and(|r| ctx.input(|i| i.pointer.interact_pos().is_some_and(|p| r.contains(p))));
+        let pressed_outside = ctx.input(|i| i.pointer.any_pressed() && i.pointer.interact_pos().is_some_and(|p| !area.response.rect.contains(p))) && !in_menu;
+        if let Some((l, at)) = open_for {
+            self.card = Some(card);
+            self.open_card(l, at);
+            return;
         }
+        if close || pressed_outside || (ctx.input(|i| i.key_pressed(Key::Escape)) && self.ctx_menu.is_none()) {
+            return;
+        }
+        self.card = Some(card);
     }
 
     /// The right-click menu on a message: copy, reply, and for moderators the Moderate section.
     fn message_menu(&mut self, ctx: &egui::Context) {
         let Some(menu) = &self.ctx_menu else { return };
         let (seq, at, open) = (menu.seq, menu.at, menu.open);
-        let Some(row) = self.rows.iter().find(|r| r.seq == seq) else {
+        let found = self.rows.iter().chain(self.held.iter()).chain(self.card.iter().flat_map(|c| c.rows.iter())).find(|r| r.seq == seq);
+        let Some(row) = found else {
             self.ctx_menu = None;
+            self.menu_rect = None;
             return;
         };
         let login = row.login().unwrap_or_default().to_string();
@@ -2148,12 +2312,14 @@ impl App {
             self.live.pin = None;
             close = true;
         }
+        self.menu_rect = Some(area.response.rect);
         if let Some(m) = &mut self.ctx_menu {
             m.open = next_open;
         }
         let pressed_outside = ctx.input(|i| i.pointer.any_pressed() && i.pointer.interact_pos().is_some_and(|p| !area.response.rect.contains(p)));
         if close || pressed_outside || ctx.input(|i| i.key_pressed(Key::Escape)) {
             self.ctx_menu = None;
+            self.menu_rect = None;
         }
     }
 
@@ -2293,6 +2459,24 @@ fn small_button(ui: &mut egui::Ui, text: &str, danger: bool) -> Response {
 }
 
 /// A full width row in the chatter card: icon, then text.
+/// A box with a label that ticks on and off.
+fn check(ui: &mut egui::Ui, text: &str, on: bool) -> Response {
+    let g = ui.painter().layout_no_wrap(text.into(), regular(13.0), TEXT);
+    let (rect, resp) = ui.allocate_exact_size(vec2(g.size().x + 20.0 + 18.0, 30.0), Sense::click());
+    let b = Rect::from_center_size(pos2(rect.left() + 9.0, rect.center().y), vec2(16.0, 16.0));
+    ui.painter().rect_filled(b, CornerRadius::same(4), if on { SAGE } else if resp.hovered() { BTN_IN_HOVER } else { BTN_IN });
+    if on {
+        let c = b.center();
+        ui.painter().line_segment([c + vec2(-4.0, 0.0), c + vec2(-1.0, 3.0)], Stroke::new(2.0, ON_SAGE));
+        ui.painter().line_segment([c + vec2(-1.0, 3.0), c + vec2(4.5, -3.5)], Stroke::new(2.0, ON_SAGE));
+    }
+    ui.painter().galley(pos2(b.right() + 8.0, rect.center().y - g.size().y / 2.0), g, TEXT);
+    if resp.hovered() {
+        ui.ctx().set_cursor_icon(CursorIcon::PointingHand);
+    }
+    resp
+}
+
 fn card_item(ui: &mut egui::Ui, icons: &Icons, icon: &str, text: &str, danger: bool) -> Response {
     let (rect, resp) = ui.allocate_exact_size(vec2(ui.available_width(), 36.0), Sense::click());
     if resp.hovered() {

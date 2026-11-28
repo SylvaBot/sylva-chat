@@ -5,7 +5,7 @@ use crate::chat::{self, Session as ChatSession};
 use crate::lines::duration;
 use crate::secrets;
 use crate::twitch::{self, Error, TwitchClient, TwitchTokens};
-use crate::ui_events::{Notify, Ui, User};
+use crate::ui_events::{Profile, Notify, Ui, User};
 use reqwest::Method;
 use std::sync::Arc;
 use tokio::sync::{Mutex, RwLock};
@@ -202,6 +202,38 @@ impl Backend {
     }
 
     /// Emote codes for Tab completion, shortest first.
+    /// Reads a chatter's profile for their card: who they are, how many follow them, and since
+    /// when they have followed this channel.
+    pub async fn load_profile(self: Arc<Self>, login: String) {
+        let (Ok(client), Ok(shared)) = (self.client().await, self.running().await) else { return };
+        let login = login.trim_start_matches('@').to_lowercase();
+        let Ok(r) = client.helix(Method::GET, "/users", &[("login", login.clone())], None).await else { return };
+        let u = &r["data"][0];
+        let id = u["id"].as_str().unwrap_or_default().to_string();
+        if id.is_empty() {
+            return;
+        }
+        let day = |v: &serde_json::Value| v.as_str().map(|s| s.chars().take(10).collect::<String>()).filter(|s| !s.is_empty());
+        let mut p = Profile {
+            login: login.clone(),
+            id: id.clone(),
+            name: u["display_name"].as_str().unwrap_or(&login).to_string(),
+            avatar: u["profile_image_url"].as_str().unwrap_or_default().to_string(),
+            created: day(&u["created_at"]).unwrap_or_default(),
+            ..Profile::default()
+        };
+        (self.notify)(Ui::Profile(p.clone()));
+        let q_total = [("broadcaster_id", id.clone()), ("first", "1".to_string())];
+        let q_since = [("broadcaster_id", shared.channel_id.clone()), ("user_id", id.clone())];
+        let (total, since) = tokio::join!(
+            client.helix(Method::GET, "/channels/followers", &q_total, None),
+            client.helix(Method::GET, "/channels/followers", &q_since, None),
+        );
+        p.followers = total.ok().and_then(|v| v["total"].as_u64());
+        p.following_since = since.ok().and_then(|v| day(&v["data"][0]["followed_at"]));
+        (self.notify)(Ui::Profile(p));
+    }
+
     pub async fn emote_codes(&self) -> Vec<String> {
         let Ok(shared) = self.running().await else { return Vec::new() };
         let mut codes: Vec<String> = shared.emotes.read().unwrap().keys().cloned().collect();
