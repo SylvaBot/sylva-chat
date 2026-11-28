@@ -1,37 +1,45 @@
-// Never open a console window on Windows, in debug or release builds.
+// Never open a console window on Windows.
 #![windows_subsystem = "windows"]
 
-use tauri_plugin_window_state::StateFlags;
-
-mod commands;
+mod app;
+mod backend;
+mod chat;
+mod emotes;
+mod eventsub;
+mod images;
+mod irc;
+mod lines;
+mod live;
 mod secrets;
+mod theme;
 mod twitch;
-mod window;
+mod ui_events;
 
-fn main() {
-    tauri::Builder::default()
-        .plugin(tauri_plugin_opener::init())
-        .plugin(tauri_plugin_updater::Builder::new().build())
-        // Remember the window's size, position and maximized state between launches.
-        .plugin(
-            tauri_plugin_window_state::Builder::default()
-                .with_state_flags(StateFlags::all() - StateFlags::VISIBLE - StateFlags::DECORATIONS)
-                .build(),
-        )
-        .manage(commands::AppState::default())
-        .invoke_handler(tauri::generate_handler![
-            commands::restore_session,
-            commands::sign_in,
-            commands::cancel_sign_in,
-            commands::sign_out,
-            commands::chat_token,
-            commands::helix,
-            commands::fetch_json,
-            commands::open_external,
-            commands::check_for_update,
-            commands::apply_update,
-            window::start_window_drag,
-        ])
-        .run(tauri::generate_context!())
-        .expect("error while running Sylva Chat");
+use eframe::egui;
+
+fn main() -> eframe::Result {
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(2)
+        .enable_all()
+        .build()
+        .expect("could not start the async runtime");
+    let handle = rt.handle().clone();
+
+    let icon = image::load_from_memory(include_bytes!("../icons/128x128.png")).expect("icon").to_rgba8();
+    let (w, h) = icon.dimensions();
+    let options = eframe::NativeOptions {
+        viewport: egui::ViewportBuilder::default()
+            .with_title("Sylva Chat")
+            .with_app_id("app.sylva.chat")
+            .with_inner_size([420.0, 760.0])
+            .with_min_inner_size([300.0, 360.0])
+            .with_decorations(false)
+            .with_icon(egui::IconData { rgba: icon.into_raw(), width: w, height: h }),
+        // Only redraw when something changes: idle chat costs nothing.
+        run_and_return: false,
+        ..Default::default()
+    };
+    let result = eframe::run_native("Sylva Chat", options, Box::new(move |cc| Ok(Box::new(app::App::new(cc, handle)))));
+    drop(rt);
+    result
 }

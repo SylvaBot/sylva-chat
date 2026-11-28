@@ -1,31 +1,46 @@
 [package]
 name = "sylva-chat"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 license = "MIT"
-description = "Sylva Chat: fast Twitch chat with 7TV, BTTV and FFZ emotes and moderation."
-
-[build-dependencies]
-tauri-build = { version = "2", features = [] }
+description = "Sylva Chat: fast native Twitch chat with 7TV, BTTV and FFZ emotes and moderation."
 
 [dependencies]
-tauri = { version = "2", features = [] }
-tauri-plugin-opener = "2"
-tauri-plugin-updater = "2"
-tauri-plugin-window-state = "2"
+eframe = { version = "0.37", default-features = false, features = ["glow", "default_fonts", "persistence", "wayland", "x11"] }
+image = { version = "0.25", default-features = false, features = ["png", "gif", "webp", "jpeg"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time"] }
 tokio-util = "0.7"
 log = "0.4"
 reqwest = { version = "0.12", default-features = false, features = ["json", "native-tls", "http2"] }
-url = "2"
+tokio-tungstenite = { version = "0.24", default-features = false, features = ["connect", "native-tls"] }
+futures-util = { version = "0.3", default-features = false, features = ["sink", "std"] }
 keyring = { version = "3", features = ["apple-native", "windows-native", "sync-secret-service", "crypto-rust"] }
+open = "5"
+cargo-packager-updater = "0.2"
+semver = "1"
+chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
 
-[target.'cfg(windows)'.dependencies]
-windows = { version = "0.62", features = ["Win32_Foundation", "Win32_Graphics_Gdi", "Win32_UI_WindowsAndMessaging"] }
+[target.'cfg(windows)'.build-dependencies]
+winresource = "0.1"
 
 [profile.release]
 lto = true
 codegen-units = 1
 strip = true
+opt-level = 3
+
+[package.metadata.packager]
+product-name = "Sylva Chat"
+identifier = "app.sylva.chat"
+publisher = "Sylva"
+category = "SocialNetworking"
+copyright = "Copyright 2026 haruxee"
+description = "Fast native Twitch chat for streamers."
+out-dir = "dist"
+icons = ["icons/32x32.png", "icons/128x128.png", "icons/128x128@2x.png", "icons/icon.icns", "icons/icon.ico"]
+binaries = [{ path = "sylva-chat", main = true }]
+
+[package.metadata.packager.nsis]
+installer-mode = "currentUser"
