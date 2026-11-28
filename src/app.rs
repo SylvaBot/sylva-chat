@@ -34,12 +34,43 @@ const COMPOSER_H: f32 = 64.0;
 
 enum ItemKind {
     Galley(Arc<Galley>),
-    Image { url: String, layers: Vec<(String, egui::Vec2)> },
+    Image { url: String, layers: Vec<(String, egui::Vec2)>, tip: Option<Arc<Tip>> },
     Chip(Arc<Galley>),
     Icon(&'static str),
 }
 
 /// What clicking an item does.
+#[derive(Clone)]
+/// What the hover card shows for an emote, emoji or badge.
+struct Tip {
+    name: String,
+    by: String,
+    big: String,
+}
+
+/// The largest picture in an emote's `srcset`, for the hover card.
+fn big_url(src: &str, srcset: &str) -> String {
+    if let Some(base) = src.strip_suffix("/1.0") {
+        return format!("{base}/3.0");
+    }
+    srcset.split(',').filter_map(|s| s.split_whitespace().next()).next_back().unwrap_or(src).to_string()
+}
+
+const TWEMOJI: &str = "https://cdn.jsdelivr.net/gh/jdecked/twemoji@v15.1.0/assets/72x72";
+
+/// A picture and name for one grapheme when it is an emoji. Plain symbols such as (c) stay text.
+fn emoji(g: &str) -> Option<(String, String)> {
+    let first = g.chars().next()?;
+    if g.chars().count() == 1 && (first as u32) < 0x2100 {
+        return None;
+    }
+    let e = emojis::get(g).or_else(|| emojis::get(&g.replace('\u{fe0f}', "")))?;
+    // Twemoji names files by code point, without U+FE0F unless the emoji joins with U+200D.
+    let keep_fe0f = g.contains('\u{200d}');
+    let hex: Vec<String> = g.chars().filter(|c| keep_fe0f || *c != '\u{fe0f}').map(|c| format!("{:x}", c as u32)).collect();
+    Some((format!("{TWEMOJI}/{}.png", hex.join("-")), e.name().to_string()))
+}
+
 #[derive(Clone)]
 enum Hit {
     Name(String),
@@ -171,17 +202,38 @@ impl<'a> Flow<'a> {
         // One galley per word (with its trailing space) so lines can wrap between words.
         let width = self.right - self.left;
         for word in text.split_inclusive(' ') {
-            let mut job = LayoutJob::single_section(word.to_string(), format.clone());
-            job.wrap.max_width = width;
-            job.wrap.break_anywhere = true;
-            let g = self.painter.layout_job(job);
-            self.galley(g, hit.clone());
+            // Emoji show as pictures, so every system shows them in color.
+            let mut run = String::new();
+            for g in unicode_segmentation::UnicodeSegmentation::graphemes(word, true) {
+                match emoji(g) {
+                    Some((url, name)) => {
+                        if !run.is_empty() {
+                            self.word(std::mem::take(&mut run), &format, width, hit.clone());
+                        }
+                        let size = (format.font_id.size * 1.45).round();
+                        let tip = Some(Arc::new(Tip { name, by: "Emoji".into(), big: url.clone() }));
+                        self.place(vec2(size, size), ItemKind::Image { url, layers: Vec::new(), tip }, hit.clone(), 1.0);
+                    }
+                    None => run.push_str(g),
+                }
+            }
+            if !run.is_empty() {
+                self.word(run, &format, width, hit.clone());
+            }
         }
     }
 
-    fn emote(&mut self, url: &str, w: u32, h: u32, layers: Vec<(String, egui::Vec2)>, gap: f32) {
+    fn word(&mut self, word: String, format: &TextFormat, width: f32, hit: Option<Hit>) {
+        let mut job = LayoutJob::single_section(word, format.clone());
+        job.wrap.max_width = width;
+        job.wrap.break_anywhere = true;
+        let g = self.painter.layout_job(job);
+        self.galley(g, hit);
+    }
+
+    fn emote(&mut self, url: &str, w: u32, h: u32, layers: Vec<(String, egui::Vec2)>, gap: f32, tip: Option<Arc<Tip>>) {
         let size = self.emote_size(url, w, h);
-        self.place(size, ItemKind::Image { url: url.to_string(), layers }, None, gap);
+        self.place(size, ItemKind::Image { url: url.to_string(), layers, tip }, None, gap);
     }
 
     fn emote_size(&mut self, url: &str, w: u32, h: u32) -> egui::Vec2 {
@@ -226,10 +278,11 @@ fn layout_parts(flow: &mut Flow, parts: &[Part], color: Color32, gone: bool) {
                 f.underline = Stroke::new(1.0, Color32::from_rgba_unmultiplied(0xd6, 0xef, 0xc2, 100));
                 flow.text(v, strike(f), Some(Hit::Link(url.clone())));
             }
-            Part::Emote { e, layers, .. } => {
+            Part::Emote { code, e, layers } => {
+                let tip = Some(Arc::new(Tip { name: code.clone(), by: e.by.to_string(), big: big_url(&e.src, &e.srcset) }));
                 let layers = layers.iter().map(|l| (l.e.src.clone(), vec2(l.e.w as f32, l.e.h as f32))).collect();
                 flow.dim = gone;
-                flow.emote(&e.src, e.w, e.h, layers, 0.0);
+                flow.emote(&e.src, e.w, e.h, layers, 0.0, tip);
                 flow.dim = false;
                 // Keep a normal space after an emote.
                 flow.x += 4.0;
@@ -261,7 +314,7 @@ fn layout_row(row: &Row, width: f32, painter: &egui::Painter, images: &Images) -
                 flow.place(g.size() + vec2(12.0, 18.0 - g.size().y), ItemKind::Chip(g), None, 6.0);
             }
             for b in badges {
-                flow.place(vec2(BADGE, BADGE), ItemKind::Image { url: b.src.clone(), layers: Vec::new() }, None, 4.0);
+                flow.place(vec2(BADGE, BADGE), ItemKind::Image { url: b.src.clone(), layers: Vec::new(), tip: Some(Arc::new(Tip { name: b.title.clone(), by: "Badge".into(), big: big_url(&b.src, &b.srcset) })) }, None, 4.0);
             }
             let name_color = theme::parse_hex(color);
             let g = painter.layout_no_wrap(name.clone(), bold(TEXT_SIZE), name_color);
@@ -286,7 +339,7 @@ fn layout_row(row: &Row, width: f32, painter: &egui::Painter, images: &Images) -
             flow.y += g.size().y.max(20.0) + 2.0;
             if !parts.is_empty() {
                 for b in badges {
-                    flow.place(vec2(BADGE, BADGE), ItemKind::Image { url: b.src.clone(), layers: Vec::new() }, None, 4.0);
+                    flow.place(vec2(BADGE, BADGE), ItemKind::Image { url: b.src.clone(), layers: Vec::new(), tip: Some(Arc::new(Tip { name: b.title.clone(), by: "Badge".into(), big: big_url(&b.src, &b.srcset) })) }, None, 4.0);
                 }
                 let g = painter.layout_no_wrap(name.clone(), bold(TEXT_SIZE), theme::parse_hex(color));
                 flow.place(g.size(), ItemKind::Galley(g), Some(Hit::Name(login.clone())), 0.0);
@@ -961,6 +1014,7 @@ impl App {
         let mut clicked: Option<(Hit, Pos2)> = None;
         let mut hovered_row: Option<(u64, Rect)> = None;
         let mut next_frame: Option<u64> = None;
+        let mut hover_tip: Option<(Arc<Tip>, Rect, String)> = None;
         let now_ms = (now * 1000.0) as u64;
         let jump = std::mem::take(&mut self.jump);
         let mut area = egui::ScrollArea::vertical().id_salt("chat").stick_to_bottom(true).auto_shrink([false, false]);
@@ -1006,7 +1060,12 @@ impl App {
                             ItemKind::Icon(name) => {
                                 ui.painter().image(self.icons.get(name).id(), r, uv(), FAINT);
                             }
-                            ItemKind::Image { url, layers } => {
+                            ItemKind::Image { url, layers, tip } => {
+                                if let Some(t) = tip {
+                                    if pointer.is_some_and(|p| r.contains(p)) {
+                                        hover_tip = Some((t.clone(), r, url.clone()));
+                                    }
+                                }
                                 let tint = if it.dim { Color32::from_white_alpha(90) } else { Color32::WHITE };
                                 for (u, _) in std::iter::once((url, &egui::Vec2::ZERO)).chain(layers.iter().map(|(u, s)| (u, s))) {
                                     if let Some(a) = self.images.get(u) {
@@ -1036,6 +1095,9 @@ impl App {
             let _ = out;
         });
         self.at_bottom = at_bottom;
+        if let Some((tip, r, small)) = hover_tip {
+            self.emote_card(&ctx, &tip, r, &small, now_ms);
+        }
         if let Some(ms) = next_frame {
             ctx.request_repaint_after(std::time::Duration::from_millis(ms.max(16)));
         }
@@ -1574,6 +1636,7 @@ impl App {
         if self.focus_composer {
             self.focus_composer = false;
             ctx.memory_mut(|m| m.request_focus(id));
+            set_cursor_end(&ctx, id, &self.composer);
         }
         let resp = ui.interact(send_rect, Id::unique("send"), Sense::click()).on_hover_text("Send");
         ui.painter().rect_filled(send_rect, R_ITEM, if resp.hovered() { SAGE_HOVER } else { SAGE });
@@ -1641,6 +1704,46 @@ impl App {
         self.completion = keep;
     }
 
+    /// The emote, emoji or badge under the pointer, larger, with its name and where it is from.
+    fn emote_card(&self, ctx: &egui::Context, tip: &Tip, at: Rect, small: &str, now_ms: u64) {
+        const BIG: f32 = 96.0;
+        let screen = ctx.content_rect();
+        let pic = self.images.get(&tip.big).or_else(|| self.images.get(small));
+        let painter = ctx.layer_painter(egui::LayerId::new(Order::Tooltip, Id::unique("emote-card")));
+        let size = match &pic {
+            Some(a) if a.size.y > 0.0 => {
+                let s = BIG / a.size.y;
+                vec2((a.size.x * s).min(BIG * 3.0), BIG)
+            }
+            _ => vec2(BIG, BIG),
+        };
+        let name = painter.layout_no_wrap(tip.name.clone(), semibold(13.5), TEXT);
+        let by = painter.layout_no_wrap(tip.by.clone(), regular(12.0), FAINT);
+        let w = size.x.max(name.size().x).max(by.size().x) + 32.0;
+        let h = 16.0 + size.y + 12.0 + name.size().y + 2.0 + by.size().y + 14.0;
+        let mut pos = pos2(at.center().x - w / 2.0, at.top() - 8.0 - h);
+        if pos.y < TITLEBAR + 4.0 {
+            pos.y = at.bottom() + 8.0;
+        }
+        pos.x = pos.x.clamp(screen.left() + 8.0, (screen.right() - w - 8.0).max(screen.left() + 8.0));
+        let rect = Rect::from_min_size(pos, vec2(w, h));
+        painter.add(shadow().as_shape(rect, R_ITEM));
+        painter.rect_filled(rect, R_ITEM, SURFACE_2);
+        let slot = Rect::from_min_size(pos2(rect.center().x - size.x / 2.0, rect.top() + 16.0), size);
+        if let Some(a) = pic {
+            let (tex, next) = a.frame(now_ms);
+            painter.image(tex.id(), fit_rect(slot, a.size), uv(), Color32::WHITE);
+            if let Some(n) = next {
+                ctx.request_repaint_after(std::time::Duration::from_millis(n.max(16)));
+            }
+        } else {
+            ctx.request_repaint_after(std::time::Duration::from_millis(100));
+        }
+        let ny = slot.bottom() + 12.0;
+        painter.galley(pos2(rect.center().x - name.size().x / 2.0, ny), name.clone(), TEXT);
+        painter.galley(pos2(rect.center().x - by.size().x / 2.0, ny + name.size().y + 2.0), by, FAINT);
+    }
+
     fn chatter_card(&mut self, ctx: &egui::Context, now: f64) {
         let Some(card) = &self.card else { return };
         let login = card.login.clone();
@@ -1673,6 +1776,19 @@ impl App {
             .rev()
             .collect();
         let is_self = me.as_ref().is_some_and(|m| m.login == login);
+        // VIP and moderator come from the badges on their latest message.
+        let titles: Vec<String> = self
+            .rows
+            .iter()
+            .rev()
+            .find_map(|r| match &r.ev {
+                ChatEvent::Msg { login: l, badges, .. } if *l == login => Some(badges.iter().map(|b| b.title.to_lowercase()).collect()),
+                _ => None,
+            })
+            .unwrap_or_default();
+        let is_vip = titles.iter().any(|t| t == "vip");
+        let is_mod = titles.iter().any(|t| t == "moderator");
+        let mut mention = false;
         let armed = card.ban_armed_until > now;
         let mut close = false;
         let mut action: Option<(&'static str, Option<u64>)> = None;
@@ -1692,23 +1808,43 @@ impl App {
                 });
                 ui.label(egui::RichText::new(&login).font(mono(12.0)).color(FAINT));
                 if !is_self {
+                    ui.label(egui::RichText::new("Time out").font(regular(12.0)).color(MUTED));
                     ui.horizontal_wrapped(|ui| {
-                        for (label, secs) in [("1m", 60), ("10m", 600), ("1h", 3600), ("1d", 86400)] {
+                        for (label, secs) in [("1m", 60), ("10m", 600), ("1h", 3600), ("1d", 86400), ("1w", 604800)] {
                             if small_button(ui, label, false).clicked() {
                                 action = Some(("timeout", Some(secs)));
                             }
                         }
-                        if small_button(ui, if armed { "Ban, sure?" } else { "Ban" }, true).clicked() {
-                            if armed {
-                                action = Some(("ban", None));
-                            } else {
-                                arm = true;
-                            }
-                        }
-                        if small_button(ui, "Unban", false).clicked() {
+                        if small_button(ui, "Remove", false).on_hover_text("End a timeout or a ban").clicked() {
                             action = Some(("unban", None));
                         }
                     });
+                    ui.spacing_mut().item_spacing.y = 2.0;
+                    let item = |ui: &mut egui::Ui, icon: &str, text: &str, danger: bool| card_item(ui, &self.icons, icon, text, danger).clicked();
+                    if item(ui, "gem", if is_vip { "Remove VIP" } else { "Make VIP" }, false) {
+                        action = Some((if is_vip { "unvip" } else { "vip" }, None));
+                    }
+                    if item(ui, "star", if is_mod { "Remove moderator" } else { "Make moderator" }, false) {
+                        action = Some((if is_mod { "unmod" } else { "mod" }, None));
+                    }
+                    if item(ui, "sparkles", "Shoutout", false) {
+                        action = Some(("shoutout", None));
+                    }
+                    if item(ui, "reply", "Mention in chat", false) {
+                        mention = true;
+                    }
+                    if item(ui, "copy", "Copy name", false) {
+                        ui.ctx().copy_text(login.clone());
+                        close = true;
+                    }
+                    if item(ui, "ban", if armed { "Ban, click again to confirm" } else { "Ban" }, true) {
+                        if armed {
+                            action = Some(("ban", None));
+                        } else {
+                            arm = true;
+                        }
+                    }
+                    ui.spacing_mut().item_spacing.y = 10.0;
                 }
                 ui.label(egui::RichText::new("Recent messages").font(regular(12.0)).color(MUTED));
                 egui::ScrollArea::vertical().max_height(200.0).show(ui, |ui| {
@@ -1750,6 +1886,17 @@ impl App {
                     c.ban_armed_until = 0.0;
                 }
             }
+        }
+        if mention {
+            let at = format!("@{login} ");
+            if !self.composer.contains(&at) {
+                if !self.composer.is_empty() && !self.composer.ends_with(' ') {
+                    self.composer.push(' ');
+                }
+                self.composer.push_str(&at);
+            }
+            self.focus_composer = true;
+            close = true;
         }
         let pressed_outside = ctx.input(|i| i.pointer.any_pressed() && i.pointer.interact_pos().is_some_and(|p| !area.response.rect.contains(p)));
         if close || pressed_outside || ctx.input(|i| i.key_pressed(Key::Escape)) {
@@ -1893,6 +2040,19 @@ fn small_button(ui: &mut egui::Ui, text: &str, danger: bool) -> Response {
     resp
 }
 
+/// A full width row in the chatter card: icon, then text.
+fn card_item(ui: &mut egui::Ui, icons: &Icons, icon: &str, text: &str, danger: bool) -> Response {
+    let (rect, resp) = ui.allocate_exact_size(vec2(ui.available_width(), 36.0), Sense::click());
+    if resp.hovered() {
+        ui.painter().rect_filled(rect, R_CONTROL, if danger { Color32::from_rgba_unmultiplied(0xf5, 0x94, 0x96, 26) } else { BTN_IN });
+        ui.ctx().set_cursor_icon(CursorIcon::PointingHand);
+    }
+    let ink = if danger { DANGER } else { TEXT };
+    ui.painter().image(icons.get(icon).id(), Rect::from_min_size(pos2(rect.left() + 10.0, rect.center().y - 7.5), vec2(15.0, 15.0)), uv(), if danger { DANGER } else { MUTED });
+    ui.painter().text(pos2(rect.left() + 35.0, rect.center().y), Align2::LEFT_CENTER, text, regular(13.5), ink);
+    resp
+}
+
 fn menu_item(ui: &mut egui::Ui, icons: &Icons, icon: &str, text: &str) -> Response {
     let (rect, resp) = ui.allocate_exact_size(vec2(ui.available_width(), 36.0), Sense::click());
     if resp.hovered() {
@@ -1937,5 +2097,27 @@ impl eframe::App for App {
 
     fn clear_color(&self, _visuals: &egui::Visuals) -> [f32; 4] {
         FRAME.to_normalized_gamma_f32()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn emoji_become_twemoji_pictures() {
+        assert_eq!(emoji("😀").unwrap().0, format!("{TWEMOJI}/1f600.png"));
+        // U+FE0F goes unless the emoji joins with U+200D.
+        assert_eq!(emoji("❤️").unwrap().0, format!("{TWEMOJI}/2764.png"));
+        assert_eq!(emoji("👍🏽").unwrap().0, format!("{TWEMOJI}/1f44d-1f3fd.png"));
+        assert!(emoji("a").is_none());
+        assert!(emoji("©").is_none());
+    }
+
+    #[test]
+    fn hover_card_uses_the_biggest_picture() {
+        assert_eq!(big_url("https://x/emoticons/v2/1/default/dark/1.0", "https://x/emoticons/v2/1/default/dark/2.0 2x"), "https://x/emoticons/v2/1/default/dark/3.0");
+        assert_eq!(big_url("https://cdn/1x.webp", "https://cdn/2x.webp 2x"), "https://cdn/2x.webp");
+        assert_eq!(big_url("https://cdn/1x.webp", ""), "https://cdn/1x.webp");
     }
 }
