@@ -28,6 +28,7 @@ const SUBSCRIPTIONS: &[(&str, &str)] = &[
     ("channel.prediction.progress", "1"),
     ("channel.prediction.lock", "1"),
     ("channel.prediction.end", "1"),
+    ("channel.channel_points_custom_reward_redemption.add", "1"),
     ("channel.shared_chat.begin", "1"),
     ("channel.shared_chat.update", "1"),
     ("channel.shared_chat.end", "1"),
@@ -120,12 +121,37 @@ async fn session(
             }
             "notification" => {
                 let kind = payload["subscription"]["type"].as_str().unwrap_or_default();
+                if kind == "channel.channel_points_custom_reward_redemption.add" {
+                    let _ = tx.send(redemption(&payload["event"], shared));
+                    continue;
+                }
                 if let Some(l) = live::from_notification(kind, &payload["event"], &shared.channel_id) {
                     publish(notify, shared, l);
                 }
             }
             _ => {}
         }
+    }
+}
+
+/// A channel point redemption as a card in chat, with what the viewer typed.
+fn redemption(e: &Value, shared: &Shared) -> ChatEvent {
+    let str_of = |v: &Value| v.as_str().unwrap_or_default().to_string();
+    let login = str_of(&e["user_login"]);
+    let name = Some(str_of(&e["user_name"])).filter(|n| !n.is_empty()).unwrap_or_else(|| login.clone());
+    let cost = e["reward"]["cost"].as_u64().unwrap_or(0);
+    let title = str_of(&e["reward"]["title"]);
+    let input = str_of(&e["user_input"]);
+    ChatEvent::Event {
+        id: str_of(&e["id"]),
+        head: format!("{name} redeemed {title} · {} {}", crate::lines::thousands(cost), if cost == 1 { "point" } else { "points" }),
+        name: name.clone(),
+        color: crate::lines::name_color("", &login),
+        badges: Vec::new(),
+        parts: crate::lines::parts(&input, "", &shared.emotes.read().unwrap(), 0),
+        login,
+        old: false,
+        accent: None,
     }
 }
 
@@ -140,7 +166,11 @@ async fn subscribe(client: &TwitchClient, shared: &Shared, session_id: &str, tx:
             "transport": { "method": "websocket", "session_id": session_id },
         });
         match client.helix(Method::POST, "/eventsub/subscriptions", &[], Some(&body)).await {
-            Ok(_) => {}
+            Ok(_) => {
+                if kind.starts_with("channel.channel_points") {
+                    shared.redemptions.store(true, std::sync::atomic::Ordering::Relaxed);
+                }
+            }
             // Signed in before Sylva Chat asked for these; the rest still work.
             Err(Error::Http { status: 403, .. }) => missing = true,
             Err(e) if e.is_unauthorized() => return false,
@@ -150,7 +180,7 @@ async fn subscribe(client: &TwitchClient, shared: &Shared, session_id: &str, tx:
     if missing && !*told_scopes {
         *told_scopes = true;
         let _ = tx.send(ChatEvent::Sys {
-            text: "To see hype trains, polls and predictions here, sign out and sign in again so Twitch can allow them.".into(),
+            text: "To see hype trains, polls, predictions and channel point redemptions here, sign out and sign in again so Twitch can allow them.".into(),
         });
     }
     true

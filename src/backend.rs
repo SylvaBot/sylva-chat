@@ -14,7 +14,7 @@ use tokio_util::sync::CancellationToken;
 type CmdResult<T> = Result<T, String>;
 
 /// Reading chat, sending as yourself, deleting messages, timeouts and bans.
-const SCOPES: &str = "chat:read user:write:chat moderator:manage:banned_users moderator:manage:chat_messages channel:read:hype_train channel:read:polls channel:read:predictions";
+const SCOPES: &str = "chat:read user:write:chat moderator:manage:banned_users moderator:manage:chat_messages channel:read:hype_train channel:read:polls channel:read:predictions channel:manage:vips channel:manage:moderators moderator:manage:shoutouts channel:read:redemptions";
 
 pub struct Backend {
     notify: Notify,
@@ -24,7 +24,9 @@ pub struct Backend {
 }
 
 fn twitch_err(e: Error) -> String {
-    if e.is_unauthorized() {
+    if e.to_string().to_lowercase().contains("missing scope") {
+        "Sylva Chat needs one more permission for this. Sign out and sign in again to allow it.".into()
+    } else if e.is_unauthorized() {
         format!("Twitch said no ({e}). If this keeps happening, sign out and sign in again.")
     } else {
         e.to_string()
@@ -89,7 +91,7 @@ impl Backend {
         let samples = [
             "@badges=broadcaster/1;color=#0000FF;display-name=Haruxee;emotes=25:6-10;id=a1;tmi-sent-ts=1700000000000 :haruxee!h@h PRIVMSG #haruxee :hello Kappa welcome in",
             "@badges=;color=;display-name=viewer1;first-msg=1;id=a2;reply-parent-display-name=Haruxee;reply-parent-user-login=haruxee;reply-parent-msg-body=hello\\sKappa :viewer1!v@v PRIVMSG #haruxee :@haruxee nice stream, check twitch.tv/haruxee",
-            "@badges=;color=#123456;display-name=Lurker;id=a3 :lurker!l@l PRIVMSG #haruxee :\u{1}ACTION waves\u{1}",
+            "@badges=;color=#123456;display-name=Lurker;id=a3 :lurker!l@l PRIVMSG #haruxee :\u{1}ACTION waves 👋🏽 love this ❤️\u{1}",
             "@badges=;color=#FF7F50;display-name=LongTalker;id=a4 :longtalker!l@l PRIVMSG #haruxee :this is a much longer message that should wrap onto a second line so we can see how wrapping looks in a narrow window",
             "@badges=;color=#9ACD32;display-name=FriendViewer;id=a6;room-id=1;source-room-id=2 :friendviewer!f@f PRIVMSG #haruxee :hi from the other side",
             "@display-name=Haruxee;login=haruxee;msg-id=announcement;msg-param-color=BLUE;id=a7;color=#0000FF :tmi.twitch.tv USERNOTICE #haruxee :Giveaway at 100 followers",
@@ -275,6 +277,31 @@ pub async fn moderate(
         "unban" => {
             unban(&client, &shared, &login).await?;
             Ok(Some(format!("{name} can chat again.")))
+        }
+        "vip" | "unvip" | "mod" | "unmod" => {
+            let q = vec![("broadcaster_id", shared.channel_id.clone()), ("user_id", user_id(&client, &shared, &login).await?)];
+            let (path, method) = match action {
+                "vip" => ("/channels/vips", Method::POST),
+                "unvip" => ("/channels/vips", Method::DELETE),
+                "mod" => ("/moderation/moderators", Method::POST),
+                _ => ("/moderation/moderators", Method::DELETE),
+            };
+            client.helix(method, path, &q, None).await.map_err(twitch_err)?;
+            Ok(Some(match action {
+                "vip" => format!("{name} is a VIP now."),
+                "unvip" => format!("{name} is no longer a VIP."),
+                "mod" => format!("{name} is a moderator now."),
+                _ => format!("{name} is no longer a moderator."),
+            }))
+        }
+        "shoutout" => {
+            let q = vec![
+                ("from_broadcaster_id", shared.channel_id.clone()),
+                ("to_broadcaster_id", user_id(&client, &shared, &login).await?),
+                ("moderator_id", shared.me_id.clone()),
+            ];
+            client.helix(Method::POST, "/chat/shoutouts", &q, None).await.map_err(twitch_err)?;
+            Ok(Some(format!("Shoutout sent for {name}.")))
         }
         _ => Err(format!("unknown action {action}")),
     }

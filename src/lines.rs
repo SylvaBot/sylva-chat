@@ -347,6 +347,19 @@ pub fn event(m: &Message, old: bool, emotes: &HashMap<String, Emote>, all_badges
     }
 }
 
+/// 12345 as "12,345".
+pub fn thousands(n: u64) -> String {
+    let s = n.to_string();
+    let mut out = String::new();
+    for (i, c) in s.chars().enumerate() {
+        if i > 0 && (s.len() - i).is_multiple_of(3) {
+            out.push(',');
+        }
+        out.push(c);
+    }
+    out
+}
+
 pub fn duration(s: u64) -> String {
     let plural = |n: u64, unit: &str| format!("{n} {unit}{}", if n == 1 { "" } else { "s" });
     match s {

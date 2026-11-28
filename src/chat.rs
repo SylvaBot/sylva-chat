@@ -39,6 +39,8 @@ pub struct Shared {
     pub badges: RwLock<HashMap<String, Badge>>,
     /// Shared Chat channels by id, to say where a message came from.
     pub rooms: RwLock<HashMap<String, String>>,
+    /// EventSub delivers channel point redemptions, so chat leaves their messages to it.
+    pub redemptions: std::sync::atomic::AtomicBool,
 }
 
 pub struct Session {
@@ -63,6 +65,7 @@ pub fn start(notify: Notify, client: Arc<TwitchClient>, me_login: String, me_id:
         emotes: RwLock::new(HashMap::new()),
         badges: RwLock::new(HashMap::new()),
         rooms: RwLock::new(HashMap::new()),
+        redemptions: std::sync::atomic::AtomicBool::new(false),
     });
     let cancel = CancellationToken::new();
     let (tx, rx) = mpsc::unbounded_channel();
@@ -248,6 +251,11 @@ fn remember(shared: &Shared, m: &Message, login: &str) {
 
 fn handle(m: &Message, old: bool, shared: &Shared, tx: &Tx) {
     let ev = match m.command.as_str() {
+        // A live redemption with text arrives from EventSub too, as a card with the reward's name.
+        "PRIVMSG" if !old && !m.tag("custom-reward-id").is_empty() && shared.redemptions.load(std::sync::atomic::Ordering::Relaxed) => {
+            remember(shared, m, m.nick());
+            return;
+        }
         "PRIVMSG" => {
             remember(shared, m, m.nick());
             let mut ev = lines::message(m, old, &shared.me_login, &shared.emotes.read().unwrap(), &shared.badges.read().unwrap());

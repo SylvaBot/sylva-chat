@@ -147,7 +147,7 @@ impl Icons {
                 map.insert($name, ctx.load_texture($name, to_color_image(&img), TextureOptions::LINEAR));
             )*};
         }
-        icon!("x", "minus", "square", "copy", "trash", "clock", "ban", "reply", "send", "pin", "down", "logout", "update", "twitch", "user", "external", "leaf");
+        icon!("x", "minus", "square", "copy", "trash", "clock", "ban", "reply", "send", "pin", "down", "logout", "update", "twitch", "user", "external", "leaf", "gem", "star", "sparkles");
         Self { map }
     }
 
