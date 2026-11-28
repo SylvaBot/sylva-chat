@@ -1,6 +1,6 @@
 [package]
 name = "sylva-chat"
-version = "0.3.0"
+version = "0.4.0"
 edition = "2021"
 license = "MIT"
 description = "Sylva Chat: fast native Twitch chat with 7TV, BTTV and FFZ emotes and moderation."
@@ -22,6 +22,7 @@ cargo-packager-updater = "0.2"
 semver = "1"
 chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
 emojis = "0.6"
+regex = { version = "1", default-features = false, features = ["std", "unicode-perl", "unicode-case", "perf"] }
 unicode-segmentation = "1"
 
 [target.'cfg(windows)'.build-dependencies]

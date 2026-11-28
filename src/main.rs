@@ -11,6 +11,7 @@ mod irc;
 mod lines;
 mod live;
 mod secrets;
+mod settings;
 mod theme;
 mod twitch;
 mod ui_events;

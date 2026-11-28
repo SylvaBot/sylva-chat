@@ -63,6 +63,10 @@ pub enum ChatEvent {
     Deleted { id: String },
     UserCleared { login: String },
     Cleared,
+    /// Twitch's low trust status for a chatter: "active_monitoring", "restricted" or "none".
+    Suspicious { login: String, status: String },
+    /// The channel went live: "first message this stream" starts over.
+    StreamStart,
 }
 
 const DEFAULT_COLORS: &[&str] = &[
